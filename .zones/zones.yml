@@ -1,0 +1,40 @@
+# CC zone map — the parts of this codebase that are dangerous to touch.
+# Everything not listed here is unprotected: no approval needed inside a task.
+#
+# Written by `cycle init`. Edit it freely — it is yours, and it is meant to grow
+# by use rather than by a documentation project.
+
+version: 1
+
+config:
+  spike_env: local
+  spike_cleanup: null
+  spike_verify: null
+  extra_commands: []
+
+# Generated, not authored — exempt from the diff-vs-declared check.
+generated:
+  - pnpm-lock.yaml
+  - package-lock.json
+  - "**/dist/**"
+
+zones:
+  - id: schema
+    name: "Database schema"
+    risk: high
+    owner: paulo@commitcycle.com   # who approves access to this zone
+    description: "migrations and table structure — the only thing a git revert does not undo"
+    paths:
+      - "migrations/**"
+      - "**/migrations/**"
+      - "**/db/schema/**"
+      - "**/schema.sql"
+    default_policy: read-only
+  - id: sources
+    name: "Price sources"
+    risk: medium
+    owner: paulo@commitcycle.com
+    description: "what the app fetches from third parties — politeness, robots.txt and attribution live here"
+    paths:
+      - "src/sources/**"
+    default_policy: read-only
