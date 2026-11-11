@@ -1,0 +1,16 @@
+{
+  "name": "cesta-compra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "deploy": "npx --yes wrangler@4 deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251101.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
