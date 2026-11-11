@@ -1,0 +1,5 @@
+# CC runtime state — grants, events, guard snapshots
+.zones/state/
+
+# CC ephemeral task context — written by `cycle start`, never committed
+CLAUDE.local.md
