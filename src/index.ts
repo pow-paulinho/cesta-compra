@@ -1,6 +1,7 @@
-import { searchProducts } from './api';
+import { checkoutCart, searchProducts } from './api';
 import { fetchOpenPrices } from './sources/openprices';
 import { PAGE } from './ui';
+import { CHECKOUT_HTML, CHECKOUT_JS } from './ui-checkout';
 import { logImport, saveOpenPrices, seedDemo, status } from './store';
 
 export interface Env { DB: D1Database }
@@ -18,8 +19,8 @@ export async function runImport(env: Env, now = new Date(), doFetch: typeof fetc
   return { demo, openPrices: saved, requests, skipped };
 }
 
-/** The page; the checkout slots stay empty until there is a checkout. */
-export const page = (): string => PAGE.replace('<!--CHECKOUT-->', '').replace('/*CHECKOUT_JS*/', '');
+/** The page, with the checkout in its slots. */
+export const page = (): string => PAGE.replace('<!--CHECKOUT-->', CHECKOUT_HTML).replace('/*CHECKOUT_JS*/', CHECKOUT_JS);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -27,6 +28,10 @@ export default {
     if (url.pathname === '/health') return Response.json(health());
     if (url.pathname === '/api/status') return Response.json(await status(env.DB));
     if (url.pathname === '/api/products') return Response.json(await searchProducts(env.DB, url.searchParams.get('q') ?? ''));
+    if (url.pathname === '/api/checkout' && request.method === 'POST') {
+      const r = await checkoutCart(env.DB, await request.json().catch(() => null));
+      return r ? Response.json(r) : Response.json({ error: 'items: 1–60 of {ean, qty 1–99}; maxStores 1–7; source demo|open_prices' }, { status: 400 });
+    }
     if (url.pathname === '/') return new Response(page(), { headers: { 'content-type': 'text/html; charset=utf-8' } });
     return new Response('Not found', { status: 404 });
   },

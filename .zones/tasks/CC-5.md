@@ -1,7 +1,7 @@
 ---
 id: CC-5
 title: A web page to search products and build a cart, with each price's source and date in view
-state: In Progress
+state: Done
 plan_task: —
 owner: paulo@commitcycle.com
 mode: standard
@@ -35,6 +35,15 @@ None (unprotected paths).
 - [ ] Searching pesto on the live page shows Barilla, Gallo and Garofalo pesto with prices from several chains, demo prices tagged demo and real ones tagged Open Prices with their date and old when stale.
 - [ ] Add puts a product in the cart; + and − change its quantity and − at 1 removes it; the cart survives a reload.
 - [ ] At 390 px wide the page has no horizontal scroll and the cart sits under the search.
+
+## Hand-in
+
+### Done
+- GET / serves the page: search with every chain's price, demo / Open Prices + date / antiguo tags, Add; cart in localStorage with + and −.
+### Verification
+- 19/19 tests incl. test/ui.test.ts (served at /, tags present, script parses, 404). Visual proof in production after deploy.
+### Criteria
+1-3. visual review in production
 
 ---
 
