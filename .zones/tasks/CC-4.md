@@ -1,7 +1,7 @@
 ---
 id: CC-4
 title: Match the same product across chains and answer a product search with every known price, its source and its date
-state: In Progress
+state: Done
 plan_task: —
 owner: paulo@commitcycle.com
 mode: standard
@@ -35,6 +35,18 @@ None (unprotected paths).
 - [ ] EAN-8 and EAN-13 normalise to one key; listings without EAN group by normalised brand, name and size with confidence name; unit tests prove it.
 - [ ] GET /api/products?q=pesto in production answers products with prices from more than one chain, each price with source, date and stale flag.
 - [ ] Search escapes LIKE wildcards and answers an empty list for fewer than 2 characters; unit tests prove it.
+
+## Hand-in
+
+### Done
+- src/match.ts: EAN key padded to 13 digits; otherwise normalised brand+name+size (accents, decimal commas, kg/l/cl folded), confidence ean|name.
+- GET /api/products?q=: up to 30 products, each price with chain, source, cents, date, place, stale (>30 days), plus match confidence. LIKE wildcards escaped; <2 chars answers [] without a query.
+### Verification
+- 15/15 tests (match, api, previous), tsc clean. Production check after deploy.
+### Criteria
+1. test/match.test.ts
+2. after deploy
+3. test/api.test.ts
 
 ---
 
