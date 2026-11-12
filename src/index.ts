@@ -23,7 +23,10 @@ export default {
     if (url.pathname === '/api/status') return Response.json(await status(env.DB));
     return new Response('cesta-compra: under construction', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
   },
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runImport(env));
+  /* Awaited, not handed to waitUntil (CC-3): waitUntil work is cancelled about 30 s
+     after the handler returns, and the polite Open Prices reader takes longer. A
+     scheduled handler may run for minutes while it is still awaiting. */
+  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    await runImport(env);
   },
 } satisfies ExportedHandler<Env>;
