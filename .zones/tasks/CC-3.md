@@ -1,7 +1,7 @@
 ---
 id: CC-3
 title: The daily import is cut off after 30 seconds: the cron hands it to waitUntil, so the Open Prices half never finishes
-state: In Progress
+state: Done
 plan_task: —
 owner: paulo@commitcycle.com
 mode: standard
@@ -34,6 +34,16 @@ None (unprotected paths).
 
 - [ ] scheduled() awaits runImport; a unit test proves the import has finished when scheduled() resolves.
 - [ ] After one run in production, /api/status lists open_prices rows per chain and an imports row.
+
+## Hand-in
+
+### Done
+- scheduled() awaits runImport instead of waitUntil (waitUntil was cancelled ~30 s after return; the polite reader needs ~45 s).
+### Verification
+- test/scheduled.test.ts: the import log is written before scheduled() resolves. 9/9 tests, tsc clean. Production run after merge.
+### Criteria
+1. test/scheduled.test.ts
+2. after deploy
 
 ---
 

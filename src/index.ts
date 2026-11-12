@@ -1,3 +1,4 @@
+import { searchProducts } from './api';
 import { fetchOpenPrices } from './sources/openprices';
 import { logImport, saveOpenPrices, seedDemo, status } from './store';
 
@@ -21,6 +22,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json(health());
     if (url.pathname === '/api/status') return Response.json(await status(env.DB));
+    if (url.pathname === '/api/products') return Response.json(await searchProducts(env.DB, url.searchParams.get('q') ?? ''));
     return new Response('cesta-compra: under construction', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
   },
   /* Awaited, not handed to waitUntil (CC-3): waitUntil work is cancelled about 30 s

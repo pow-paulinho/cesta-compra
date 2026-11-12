@@ -1,7 +1,7 @@
 ---
 id: CC-2
 title: Import prices once a day: Open Prices for Spanish supermarkets, politely, plus a seeded and labelled demo price set
-state: In Progress
+state: Done
 plan_task: —
 owner: paulo@commitcycle.com
 mode: standard
@@ -36,6 +36,21 @@ schema (write), sources (write)
 - [ ] The Open Prices reader keeps only Spanish locations of the seven chains, skips items without EAN, EUR price or date, waits 1.1 s between requests, sends the project user-agent and stops at the cap; unit tests prove each.
 - [ ] Demo prices are stable between runs, within -8% and +12% of a reference price, and every demo product has a price in at least three chains; unit tests prove it.
 - [ ] After one run in production, /api/status shows demo and Open Prices rows per chain with their newest date.
+
+## Hand-in
+
+### Done
+- Migration 0001: products (EAN), prices (one per product, chain and source open_prices|demo, observed_on), imports log.
+- Open Prices reader: Spanish locations of 7 chains only, one request at a time 1.1 s apart, project user-agent, cap 40 requests per run; skips items without EAN, EUR price or date.
+- Demo set: 50 real EANs/names seen in Open Prices for Spain, 5 chains, stable derived prices labelled demo.
+- Daily cron 05:17 UTC; GET /api/status.
+### Verification
+- npm test 8/8 and tsc clean, locally and from a clean checkout of the branch. CI on the PR.
+### Criteria
+1. migrations/0001_prices.sql
+2. test/openprices.test.ts
+3. test/demo.test.ts
+4. to be shown after deploy
 
 ---
 
