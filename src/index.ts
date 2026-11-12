@@ -1,5 +1,6 @@
 import { searchProducts } from './api';
 import { fetchOpenPrices } from './sources/openprices';
+import { PAGE } from './ui';
 import { logImport, saveOpenPrices, seedDemo, status } from './store';
 
 export interface Env { DB: D1Database }
@@ -17,13 +18,17 @@ export async function runImport(env: Env, now = new Date(), doFetch: typeof fetc
   return { demo, openPrices: saved, requests, skipped };
 }
 
+/** The page; the checkout slots stay empty until there is a checkout. */
+export const page = (): string => PAGE.replace('<!--CHECKOUT-->', '').replace('/*CHECKOUT_JS*/', '');
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json(health());
     if (url.pathname === '/api/status') return Response.json(await status(env.DB));
     if (url.pathname === '/api/products') return Response.json(await searchProducts(env.DB, url.searchParams.get('q') ?? ''));
-    return new Response('cesta-compra: under construction', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    if (url.pathname === '/') return new Response(page(), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    return new Response('Not found', { status: 404 });
   },
   /* Awaited, not handed to waitUntil (CC-3): waitUntil work is cancelled about 30 s
      after the handler returns, and the polite Open Prices reader takes longer. A
