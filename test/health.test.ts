@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import worker, { health } from '../src/index';
+import worker, { health, type Env } from '../src/index';
 
 describe('health', () => {
   it('names the app', () => {
@@ -7,7 +7,7 @@ describe('health', () => {
   });
 
   it('answers /health with JSON', async () => {
-    const res = await worker.fetch(new Request('https://x.test/health'));
+    const res = await worker.fetch(new Request('https://x.test/health'), {} as Env);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, app: 'cesta-compra' });
   });
