@@ -1,7 +1,7 @@
 ---
 id: CC-1
 title: Scaffold the Worker with a health route, and a CI workflow that runs the tests and the typecheck on every pull request
-state: In Progress
+state: Done
 plan_task: —
 owner: paulo@commitcycle.com
 mode: standard
