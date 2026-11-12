@@ -3,5 +3,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "cesta-compra", "database_id": "f1542297-38bc-433e-a7fd-1885d4b1a8a9", "migrations_dir": "migrations" }
+  ],
+  // Once a day, early morning UTC: the demo seed and the Open Prices import.
+  "triggers": { "crons": ["17 5 * * *"] }
 }
