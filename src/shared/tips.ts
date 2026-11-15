@@ -10,7 +10,7 @@ import { CHAINS } from './chains';
 import type { ChainId, Offer } from './types';
 import { costFor, isOwnBrand, offerSize, offerUnitPrice, ownBrandOf, STOP_WORDS, wantedSize } from './equiv';
 import type { Optimisation, PlanItem, PlanResult, StopLine } from './optimize';
-import { formatEuros, formatSize, formatUnitPrice, NBSP, totalAmount } from './units';
+import { formatEuros, formatSize, formatUnitPrice, NBSP, priceUnitOf, totalAmount } from './units';
 
 export interface Tip {
   id: string;
@@ -120,11 +120,35 @@ function fullSingles(opt: Optimisation): Optimisation['singles'] {
   return opt.singles.filter((s) => s.stores > 0 && s.missing.length === nowhere);
 }
 
+/** Do two sizes compare (same base unit, within 20 %)? Unknown ones do not. */
+function sameSize(a: Offer, b: Offer): boolean {
+  const x = offerSize(a);
+  const y = offerSize(b);
+  if (!x || !y || x.unit !== y.unit) return false;
+  const [lo, hi] = [totalAmount(x), totalAmount(y)].sort((m, n) => m - n) as [number, number];
+  return hi <= lo * 1.2;
+}
+
+/**
+ * Does the difference between two plans hinge on an item without a wanted size
+ * bought in sizes that do not compare (opt.incomparable)? Then their totals
+ * are not like for like, and no saving between them is claimed.
+ */
+function hinges(opt: Optimisation, a: PlanResult | null | undefined, b: PlanResult | null | undefined): boolean {
+  const ids = new Set(opt.incomparable ?? []);
+  if (!ids.size || !a || !b) return false;
+  const inB = new Map(planLines(b).map((l) => [l.itemId, l]));
+  return planLines(a).some((l) => {
+    const other = inB.get(l.itemId);
+    return ids.has(l.itemId) && !!other && (other.chain !== l.chain || other.offer.id !== l.offer.id) && !sameSize(l.offer, other.offer);
+  });
+}
+
 function splitTip(opt: Optimisation): Tip | null {
   const { split } = opt;
   if (split.stores < 2 || split.missing.length !== opt.byCap.all.missing.length) return null;
   const bestSingle = opt.bestSingle ?? fullSingles(opt)[0] ?? null;
-  if (!bestSingle) return null;
+  if (!bestSingle || hinges(opt, bestSingle, split)) return null;
   const savingCents = bestSingle.totalCents - split.totalCents;
   if (savingCents <= 0) return null;
   const perExtra = Math.round(savingCents / (split.stores - 1));
@@ -146,7 +170,7 @@ function singleTip(opt: Optimisation): Tip | null {
   if (full.length >= 2) {
     const [best, second] = full as [typeof full[number], typeof full[number]];
     const diff = second.totalCents - best.totalCents;
-    if (diff <= 0) return null;
+    if (diff <= 0 || hinges(opt, best, second)) return null;
     return {
       id: 'single',
       icon: '🏆',
@@ -173,7 +197,7 @@ function moreStoresTip(opt: Optimisation): Tip | null {
   const { split } = opt;
   const all = opt.byCap.all;
   const delta = split.totalCents - all.totalCents;
-  if (all.stores <= split.stores || all.missing.length > split.missing.length || delta < 50) return null;
+  if (all.stores <= split.stores || all.missing.length > split.missing.length || delta < 50 || hinges(opt, split, all)) return null;
   const now = new Set(split.stops.map((s) => s.chain));
   const then = new Set(all.stops.map((s) => s.chain));
   const added = all.stops.map((s) => s.chain).filter((c) => !now.has(c));
@@ -270,6 +294,30 @@ function missingTip(items: PlanItem[], opt: Optimisation): Tip | null {
     icon: '🔍',
     title: plural(ids.length, 'Un producto sin precio', `${ids.length} productos sin precio`),
     body: `${plural(ids.length, 'No hemos encontrado precio', 'No hemos encontrado precios')} en ningún súper para: ${shown}. Prueba con «Me vale otra marca».`,
+  };
+}
+
+/** An item without a wanted size that every chain sells in another size: ask for the size, point to the unit price. */
+function sizeTip(items: PlanItem[], opt: Optimisation): Tip | null {
+  const ids = new Set(opt.incomparable ?? []);
+  const item = items.find((i) => ids.has(i.id));
+  if (!item) return null;
+  const sized = Object.values(item.offers)
+    .filter((o): o is Offer => !!o && o.priceCents > 0)
+    .map((o) => ({ o, size: offerSize(o) }))
+    .filter((x): x is { o: Offer; size: NonNullable<ReturnType<typeof offerSize>> } => x.size !== null)
+    .sort((a, b) => totalAmount(a.size) - totalAmount(b.size) || (a.o.chain < b.o.chain ? -1 : 1));
+  if (sized.length < 2) return null;
+  const shown = [sized[0]!, sized[sized.length - 1]!];
+  const list = shown.map((x) => `${chainName(x.o.chain)}, ${formatSize(x.size)}`).join('; ');
+  const unit = priceUnitOf(sized[0]!.size.unit);
+  const per = unit === 'kg' ? 'kilo' : unit === 'l' ? 'litro' : 'unidad';
+  const noun = shortNoun(item);
+  return {
+    id: 'size',
+    icon: '📏',
+    title: `¿Qué tamaño de ${noun}?`,
+    body: `No sabemos qué tamaño de ${noun} quieres y cada súper lo vende en uno distinto (${list}), así que su precio no se puede comparar tal cual. Fíjate en el precio por ${per}.`,
   };
 }
 
@@ -426,6 +474,7 @@ export function savingTips(items: PlanItem[], opt: Optimisation, now: Date = new
     ownBrand,
     moreStoresTip(opt),
     missingTip(active, opt),
+    sizeTip(active, opt),
     singleTip(opt),
     demoTip(opt),
     staleTip(opt, now),

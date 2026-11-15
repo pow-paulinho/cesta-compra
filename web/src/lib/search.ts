@@ -27,10 +27,69 @@ export interface SearchState {
  */
 const EXPECTED: SearchSource[] = ['catalogo', 'openfoodfacts', ...Object.values(CHAINS).filter((c) => c.mode === 'live').map((c) => c.id)];
 
+/** What each source is called on screen: what it gives you, not the name of the dataset. */
 export function sourceName(s: SearchSource): string {
-  if (s === 'catalogo') return 'Catálogo';
-  if (s === 'openfoodfacts') return 'Open Food Facts';
+  if (s === 'catalogo') return 'Precios guardados';
+  if (s === 'openfoodfacts') return 'Fotos e ingredientes';
   return CHAINS[s]?.name ?? s;
+}
+
+/** "Aldi", "Aldi y Lidl", "Alcampo, Aldi y Ahorramas". */
+export function joinList(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} y ${names[names.length - 1]}`;
+}
+
+/** Why live chains are locked: no key yet, a key that does not match, or live search off on the server. */
+export type LockKind = 'missing' | 'wrong' | 'disabled';
+
+export function lockKind(locked: Pick<SourceState, 'reason'>[], hasKey: boolean): LockKind {
+  // The Worker's wording (src/live/auth.ts lockedReason) says when live search is off on the server.
+  if (locked.some((s) => s.reason && /no está activada/i.test(s.reason))) return 'disabled';
+  return hasKey ? 'wrong' : 'missing';
+}
+
+/** One line for all the locked chains instead of one amber pill each. */
+export function lockedLine(names: string[], kind: LockKind): string {
+  const list = joinList(names);
+  if (kind === 'disabled') return `${list}: la búsqueda en directo está apagada en el servidor`;
+  if (kind === 'wrong') return `Tu clave no funciona: sin ${list} en directo`;
+  return `${list} ${names.length === 1 ? 'necesita' : 'necesitan'} tu clave`;
+}
+
+/** The text of a source pill after its name. */
+export function pillStatus(s: Pick<SourceState, 'status' | 'count'>): string {
+  switch (s.status) {
+    case 'pending':
+      return 'buscando…';
+    case 'ok':
+      return `${s.count} ${s.count === 1 ? 'encontrado' : 'encontrados'}`;
+    case 'none':
+      return 'sin resultados';
+    case 'locked':
+      return 'sin clave';
+    case 'blocked':
+      return 'bloqueado';
+    case 'unavailable':
+      return 'no disponible';
+    default:
+      return 'error';
+  }
+}
+
+/**
+ * What the polite live region says: once when a search starts and once when it ends, with the
+ * number of products, instead of a countdown of sources (finding a11y-10).
+ */
+export function searchAnnouncement(s: Pick<SearchState, 'q' | 'phase' | 'products' | 'sources'>): string {
+  if (!s.q) return '';
+  if (s.phase === 'loading') return `Buscando «${s.q}»…`;
+  if (s.phase !== 'done') return ''; // errors are announced by their own alert
+  const n = s.products.length;
+  const found = n ? `${n} ${n === 1 ? 'producto' : 'productos'} para «${s.q}».` : `No hemos encontrado «${s.q}».`;
+  const locked = s.sources.filter((x) => x.status === 'locked').length;
+  const lockedText = locked ? ` ${locked} ${locked === 1 ? 'súper necesita' : 'súper necesitan'} tu clave para buscar en directo.` : '';
+  return found + lockedText;
 }
 
 const blank = (q: string): SearchState => ({

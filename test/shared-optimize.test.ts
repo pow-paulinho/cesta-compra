@@ -229,6 +229,17 @@ describe('optimise', () => {
     const r = optimise([item('fruta', 3, { aldi: [200, null], lidl: [250, null] }, null)]);
     expect(r.split.totalCents).toBe(600);
     expect(r.split.stops[0]!.lines[0]!.packs).toBe(3);
+    expect(r.incomparable).toEqual([]);
+  });
+
+  it('flags items without a wanted size whose offers come in sizes that do not compare', () => {
+    const r = optimise([
+      item('aceite', 1, { aldi: [3200, '5 L'], lidl: [350, '250 ml'] }, null),
+      item('leche', 1, { aldi: [100, '1 L'], lidl: [110, '1,1 L'] }, null),
+      item('queso', 1, { aldi: [300, '250 g'], lidl: [300, '250 ml'] }, null),
+      item('agua', 1, { aldi: [50, '1,5 L'], lidl: [600, '6 x 1,5 L'] }, '1,5 L'),
+    ]);
+    expect(r.incomparable).toEqual(['aceite', 'queso']);
   });
 
   it('handles all eight chains at once', () => {

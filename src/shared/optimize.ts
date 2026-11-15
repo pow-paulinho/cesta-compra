@@ -12,8 +12,8 @@
  * fewer stores, then by chain ids.
  */
 import { CHAIN_IDS, type ChainId, type Offer, type WantedProduct } from './types';
-import { costFor, wantedSize } from './equiv';
-import type { Size } from './units';
+import { costFor, offerSize, wantedSize } from './equiv';
+import { totalAmount, type Size } from './units';
 
 export interface PlanItem {
   id: string;
@@ -63,6 +63,13 @@ export interface Optimisation {
   byCap: { 1: PlanResult; 2: PlanResult; 3: PlanResult; all: PlanResult };
   /** bestSingle.totalCents - split.totalCents when the split covers every item some chain prices; else null. */
   savingCents: number | null;
+  /**
+   * Ids of the items without a wanted size whose offers come in sizes that do
+   * not compare ("250 ml" at one chain, "5 L" at another), in cart order. They
+   * are costed one pack per unit, so a saving that moves them between chains
+   * is not like for like: say so next to it.
+   */
+  incomparable: string[];
 }
 
 export interface OptimiseOptions {
@@ -149,6 +156,21 @@ function planFor(rows: Row[], chains: readonly ChainId[]): Evaluated {
   };
 }
 
+/** Items without a wanted size whose offers' sizes differ in unit or by more than 20 %. */
+function incomparableItems(rows: Row[]): string[] {
+  const out: string[] = [];
+  for (const { item, cells } of rows) {
+    if (wantedSize(item.wanted)) continue;
+    const sizes = Object.values(cells)
+      .map((c) => (c ? offerSize(c.offer) : null))
+      .filter((x): x is Size => x !== null);
+    if (sizes.length < 2) continue;
+    const totals = sizes.map(totalAmount);
+    if (sizes.some((x) => x.unit !== sizes[0]!.unit) || Math.max(...totals) > Math.min(...totals) * 1.2) out.push(item.id);
+  }
+  return out;
+}
+
 function objective(p: PlanResult, extra: number): number {
   return p.totalCents + Math.max(0, p.stores - 1) * extra;
 }
@@ -212,5 +234,6 @@ export function optimise(items: PlanItem[], opts: OptimiseOptions = {}): Optimis
     split,
     byCap: { 1: bestUnder(1), 2: bestUnder(2), 3: bestUnder(3), all: bestUnder(undefined) },
     savingCents: bestSingle && split.missing.length === nowhere ? bestSingle.totalCents - split.totalCents : null,
+    incomparable: incomparableItems(rows),
   };
 }

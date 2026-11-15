@@ -121,6 +121,33 @@ describe('savingTips', () => {
     });
   });
 
+  // Regression (shared-6): with no wanted size, a 250 ml bottle was compared
+  // one for one with a 5 L garrafa, and the single-store tip claimed 28,50 €.
+  it('claims no saving that hinges on an item without a size sold in sizes that do not compare', () => {
+    const oil = it_('aceite', 'Aceite de oliva virgen extra', 1, {}, [
+      o('aldi', 'Aceite de oliva virgen extra', null, '5 L', 3200),
+      o('lidl', 'Aceite de oliva virgen extra', null, '250 ml', 350),
+    ]);
+    const alone = savingTips([oil], optimise([oil]), NOW);
+    expect(alone.map((t) => t.body).join(' ')).not.toContain('28,50');
+    expect(byId(alone, 'single')).toBeUndefined();
+    expect(byId(alone, 'size')).toMatchObject({
+      title: '¿Qué tamaño de aceite?',
+      body: 'No sabemos qué tamaño de aceite quieres y cada súper lo vende en uno distinto (Lidl, 250 ml; Aldi, 5 L), así que su precio no se puede comparar tal cual. Fíjate en el precio por litro.',
+    });
+    expect(byId(alone, 'unit-price')!.body).toBe(eur('En Lidl, aceite cuesta 3,50 € el envase pero sale a 14,00 €/L; en Aldi, a 6,40 €/L.'));
+    // Lidl has no milk, so the single store is Aldi: the split vs Aldi hinges on the oil.
+    const milk = it_('leche', 'Leche', 1, { sizeText: '1 L' }, [o('aldi', 'Leche', null, '1 L', 100)]);
+    const opt = optimise([oil, milk]);
+    expect(opt.incomparable).toEqual(['aceite']);
+    expect(opt.bestSingle!.chain).toBe('aldi');
+    expect(byId(savingTips([oil, milk], opt, NOW), 'split')).toBeUndefined();
+    // An item whose offers come in one size, or that has a wanted size, is comparable.
+    const same = it_('aceite', 'Aceite', 1, {}, [o('aldi', 'Aceite', null, '1 L', 500), o('lidl', 'Aceite', null, '1 L', 450)]);
+    expect(optimise([same]).incomparable).toEqual([]);
+    expect(optimise([{ ...oil, wanted: { ...oil.wanted, sizeText: '1 L' } }]).incomparable).toEqual([]);
+  });
+
   it('is deterministic', () => {
     const a = savingTips(basket, optimise(basket), NOW);
     const b = savingTips(basket.map((x) => ({ ...x })), optimise(basket), new Date(NOW));
