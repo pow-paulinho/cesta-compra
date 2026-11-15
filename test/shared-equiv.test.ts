@@ -191,9 +191,19 @@ describe('costFor', () => {
     expect(costFor(garrafa, L1, 1)).toEqual({ cents: 2000, packs: 1, leftover: S(1, 4000, 'ml') });
   });
 
-  it('counts a pack within 20 % of the wanted size one for one', () => {
-    expect(costFor(offer('Leche', null, '900 ml', 90), L1, 3)).toEqual({ cents: 270, packs: 3, leftover: null });
-    expect(costFor(offer('Leche', null, '1,2 L', 90), L1, 1)).toEqual({ cents: 90, packs: 1, leftover: null });
+  // Regression (shared-1): a pack up to 20 % smaller used to count as a whole
+  // wanted unit, so five 800 g bags were costed as 5 kg.
+  it('never counts a smaller pack as a whole wanted unit', () => {
+    expect(costFor(offer('Leche', null, '900 ml', 90), L1, 3)).toEqual({ cents: 360, packs: 4, leftover: S(1, 600, 'ml') });
+    expect(costFor(offer('Arroz', null, '800 g', 100), parseSize('1 kg'), 5)).toEqual({ cents: 700, packs: 7, leftover: S(1, 600, 'g') });
+    expect(costFor(offer('Leche', null, '6 x 900 ml', 500), parseSize('6 x 1 L'), 1)).toEqual({ cents: 1000, packs: 2, leftover: S(1, 4800, 'ml') });
+    expect(costFor(offer('Leche', null, '900 ml', 90), parseSize('6 x 1 L'), 1)).toEqual({ cents: 630, packs: 7, leftover: S(1, 300, 'ml') });
+  });
+
+  it('counts a pack a hair short of the wanted size as one, and a bigger one by amount', () => {
+    expect(costFor(offer('Leche', null, '0,97 L', 90), L1, 3)).toEqual({ cents: 270, packs: 3, leftover: null });
+    expect(costFor(offer('Leche', null, '1,2 L', 90), L1, 1)).toEqual({ cents: 90, packs: 1, leftover: S(1, 200, 'ml') });
+    expect(costFor(offer('Leche', null, '1,2 L', 90), L1, 6)).toEqual({ cents: 450, packs: 5, leftover: null });
   });
 
   it('buys pieces of a multipack', () => {

@@ -204,6 +204,16 @@ describe('optimise', () => {
     expect(some.split.stops[0]!.lines[0]).toMatchObject({ packs: 1, costCents: 474, leftover: { count: 1, amount: 1000, unit: 'ml' } });
   });
 
+  // Regression (shared-1): 800 g bags used to count as 1 kg each, so the plan
+  // bought 4 kg for 5 kg and sent the item to the dearer-per-kilo chain.
+  it('never counts a smaller pack as a whole wanted unit', () => {
+    const r = optimise([item('arroz', 5, { aldi: [100, '800 g'], lidl: [110, '1 kg'] }, '1 kg')]);
+    expect(r.split.stops.map((s) => s.chain)).toEqual(['lidl']);
+    expect(r.split.totalCents).toBe(550);
+    expect(r.singles.find((s) => s.chain === 'aldi')).toMatchObject({ totalCents: 700 });
+    expect(r.singles.find((s) => s.chain === 'aldi')!.stops[0]!.lines[0]).toMatchObject({ packs: 7, costCents: 700 });
+  });
+
   it('falls back to qty packs when sizes are unknown', () => {
     const r = optimise([item('fruta', 3, { aldi: [200, null], lidl: [250, null] }, null)]);
     expect(r.split.totalCents).toBe(600);

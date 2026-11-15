@@ -272,10 +272,18 @@ export function scoreCandidate(wanted: WantedProduct, offer: Offer): { score: nu
 // ---------------------------------------------------------------------------
 
 /**
+ * A piece of `a` can stand in for one wanted piece of `b`: at most 3 % short
+ * (labels round, "0,97 L") and at most 20 % over. Matching is looser (+-20 %,
+ * see sizeRelation), but a smaller piece must never be costed as a whole one:
+ * five 800 g bags are 4 kg, not 5 kg.
+ */
+const fits = (a: number, b: number) => b > 0 && a >= b * 0.97 && a <= b * 1.2;
+
+/**
  * What it costs to buy `qty` of the wanted size with this offer, buying whole packs.
- * With both sizes known (same base unit): a pack that matches the wanted size
- * (+-20 %) counts one for one; a multipack of the wanted piece is bought by
- * pieces; otherwise packs = ceil(needed / pack). Without sizes, packs = qty.
+ * With both sizes known (same base unit): a multipack of the wanted piece is
+ * bought by pieces; otherwise packs = ceil(needed / pack), where a pack at most
+ * 3 % short of the wanted size counts as a whole one. Without sizes, packs = qty.
  * `leftover` is what is bought beyond the need (one piece of that total).
  */
 export function costFor(offer: Offer, wanted: Size | null, qty: number): { cents: number; packs: number; leftover: Size | null } {
@@ -290,24 +298,24 @@ export function costFor(offer: Offer, wanted: Size | null, qty: number): { cents
 
   let packs: number;
   let leftoverAmount = 0;
-  if (near(pack.amount, wanted.amount) && (pack.count > 1 || wanted.count > 1)) {
+  if (fits(pack.amount, wanted.amount) && (pack.count > 1 || wanted.count > 1)) {
     // Same piece, different pack: "6 x 1 L" for "1 L", "4 x 125 g" for "6 x 125 g".
     const pieces = q * wanted.count;
     packs = Math.ceil(pieces / pack.count);
     leftoverAmount = (packs * pack.count - pieces) * pack.amount;
-  } else if (near(pTotal, wTotal)) {
-    packs = q;
-  } else if (pack.count > 1 && near(pack.amount, wTotal)) {
+  } else if (pack.count > 1 && fits(pack.amount, wTotal)) {
     // A multipack whose piece is one wanted unit.
     packs = Math.ceil(q / pack.count);
     leftoverAmount = (packs * pack.count - q) * pack.amount;
-  } else if (wanted.count > 1 && near(pTotal, wanted.amount)) {
+  } else if (wanted.count > 1 && fits(pTotal, wanted.amount)) {
     // A single piece of a wanted multipack.
     packs = q * wanted.count;
   } else {
     const needed = q * wTotal;
-    packs = Math.max(1, Math.ceil(needed / pTotal - 1e-9));
-    leftoverAmount = packs * pTotal - needed;
+    // A pack a hair short of the wanted size ("0,97 L" for "1 L") counts as a whole one.
+    const per = pTotal < wTotal && fits(pTotal, wTotal) ? wTotal : pTotal;
+    packs = Math.max(1, Math.ceil(needed / per - 1e-9));
+    leftoverAmount = Math.max(0, packs * pTotal - needed);
   }
   leftoverAmount = Math.round(leftoverAmount * 1000) / 1000;
   return {
