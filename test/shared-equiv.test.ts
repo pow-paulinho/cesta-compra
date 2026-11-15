@@ -205,6 +205,11 @@ describe('costFor', () => {
     expect(costFor(half, parseSize('6 x 1 L'), 1)).toEqual({ cents: 600, packs: 6, leftover: null });
   });
 
+  it('costs a 6-pack written "6 uds. x 1 l" as one pack for six litres (shared-5)', () => {
+    expect(costFor(offer('Leche', null, '6 uds. x 1 l', 540), L1, 6)).toEqual({ cents: 540, packs: 1, leftover: null });
+    expect(offerUnitPrice(offer('Leche', null, '6 uds. x 1 l', 540))).toEqual({ cents: 90, unit: 'l' });
+  });
+
   it('falls back to one pack per unit without comparable sizes', () => {
     expect(costFor(offer('Leche', null, null, 95), L1, 3)).toEqual({ cents: 285, packs: 3, leftover: null });
     expect(costFor(offer('Leche', null, '1 L', 95), null, 3)).toEqual({ cents: 285, packs: 3, leftover: null });

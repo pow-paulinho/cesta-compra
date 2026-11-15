@@ -53,8 +53,12 @@ const CONTAINER_WORDS = [
 /**
  * Bare piece words need an explicit "x" or "de" before the measure: "4 ud x 125 g"
  * is four pieces of 125 g, but "12 ud 730 g" (eggs) is a box that weighs 730 g.
+ * An abbreviation may end in a dot ("6 uds. x 1 l", "4 u. x 125 g").
  */
-const PIECE_WORDS = ['unidades', 'unidad', 'uds', 'ud', 'u', 'piezas'];
+const PIECE_WORDS = [
+  'unidades', 'unidad', 'unids', 'unid', 'unds', 'und', 'uds', 'ud', 'u', 'piezas', 'pzas', 'pza',
+  'capsulas', 'capsula', 'bolsitas', 'bolsita', 'monodosis', 'sobres', 'sobre', 'porciones', 'raciones',
+];
 
 const byLengthDesc = (a: string, b: string) => b.length - a.length;
 const MEASURE_RE = Object.keys(MEASURE_UNITS).sort(byLengthDesc).join('|');
@@ -74,11 +78,15 @@ const RE = {
   // "6 x 1 l", "6x1l", "pack 6 x 200 ml"
   multi: new RegExp(`${START}${INT}\\s*x\\s*${NUM}\\s*(${MEASURE_RE})${UNIT_END}`),
   // "6 latas de 33 cl", "6 botellas 1.5 l"
-  container: new RegExp(`${START}${INT}\\s*(?:${CONTAINER_RE})${UNIT_END}\\s*(?:x|de)?\\s*${NUM}\\s*(${MEASURE_RE})${UNIT_END}`),
-  // "4 ud x 125 g", "6 unidades de 200 ml"
-  pieces: new RegExp(`${START}${INT}\\s*(?:${PIECE_RE})${UNIT_END}\\s*(?:x|de)\\s*${NUM}\\s*(${MEASURE_RE})${UNIT_END}`),
+  container: new RegExp(`${START}${INT}\\s*(?:${CONTAINER_RE})${UNIT_END}\\.?\\s*(?:x|de)?\\s*${NUM}\\s*(${MEASURE_RE})${UNIT_END}`),
+  // "4 ud x 125 g", "6 uds. x 1 l", "6 unidades de 200 ml", "24 capsulas x 5 g"
+  pieces: new RegExp(`${START}${INT}\\s*(?:${PIECE_RE})${UNIT_END}\\.?\\s*(?:x|de)\\s*${NUM}\\s*(${MEASURE_RE})${UNIT_END}`),
   // "125 g x 4", "1 l pack 6", "33 cl pack de 12"
   reversed: new RegExp(`${START}${NUM}\\s*(${MEASURE_RE})${UNIT_END}\\s*(?:x|pack(?:\\s*de)?)\\s*${INT}(?![\\d.])(?!\\s*(?:${MEASURE_RE})${UNIT_END})`),
+  // "1 l (6 uds)", "125 g (4 unidades)": a piece count in brackets after the measure.
+  bracketCount: new RegExp(
+    `${START}${NUM}\\s*(${MEASURE_RE})${UNIT_END}\\.?\\s*[(\\[]\\s*(?:pack\\s*(?:de\\s*)?${INT}|${INT}\\s*(?:${PIECE_RE}|${CONTAINER_RE})${UNIT_END}\\.?)\\s*[)\\]]`,
+  ),
   // "pack 6 ..." / "pack de 6 ..." when the number is a count, not a measure.
   packCount: new RegExp(`(?<![a-z])pack\\s*(?:de\\s*)?${INT}(?![\\d.])(?!\\s*x)(?!\\s*(?:${MEASURE_RE})${UNIT_END})`),
   // "500 g", "1.5 kg", "6000ml"
@@ -87,6 +95,8 @@ const RE = {
   multiCount: new RegExp(`${START}${INT}\\s*x\\s*(\\d{1,4})\\s*(?:${COUNT_RE})${UNIT_END}`),
   // "12 ud", "6 huevos"
   count: new RegExp(`${START}(\\d{1,4})\\s*(?:${COUNT_RE})${UNIT_END}`),
+  // "2 x 1 docena", "2 x docena", "3 x media docena": packs of dozens.
+  multiDozen: /(?<![a-z0-9.])(\d{1,3})\s*x\s*(?:(\d{1,2})\s*|(media)\s+)?docenas?(?![a-z])/,
   dozens: /(?<![a-z0-9.])(\d{1,2})\s*docenas?(?![a-z])/,
   dozenAndHalf: /(?<![a-z])docena\s+y\s+media(?![a-z])/,
   halfDozen: /(?<![a-z])media\s+docena(?![a-z])/,
@@ -104,6 +114,9 @@ function normaliseSizeText(text: string): string {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[\u00d7*]/g, ' x ')
+    // Vulgar fractions: "1½ l" -> "1.5 l", "½ kg" -> "1/2 kg".
+    .replace(/(\d)\s*([\u00bd\u00bc\u00be])/g, (_, d: string, f: string) => `${d}${f === '\u00bd' ? '.5' : f === '\u00bc' ? '.25' : '.75'}`)
+    .replace(/[\u00bd\u00bc\u00be]/g, (f) => (f === '\u00bd' ? ' 1/2' : f === '\u00bc' ? ' 1/4' : ' 3/4'))
     .replace(/(\d),(\d)/g, '$1.$2')
     .replace(/\s+/g, ' ')
     .trim();
@@ -162,9 +175,9 @@ function findSize(text: string, loose: boolean): Size | null {
     const ms = measure(m[2]!, m[3]!);
     if (ms) return makeSize(Number(m[1]), ms.amount, ms.unit);
   }
-  if ((m = t.match(RE.reversed))) {
+  if ((m = t.match(RE.reversed) ?? t.match(RE.bracketCount))) {
     const ms = measure(m[1]!, m[2]!);
-    if (ms) return makeSize(Number(m[3]), ms.amount, ms.unit);
+    if (ms) return makeSize(Number(m[3] ?? m[4]), ms.amount, ms.unit);
   }
   const single = t.match(RE.single);
   if (single) {
@@ -179,6 +192,7 @@ function findSize(text: string, loose: boolean): Size | null {
   if ((m = t.match(RE.quarterMeasure))) return makeSize(1, 250, m[1] === 'kilo' ? 'g' : 'ml');
   if ((m = t.match(RE.multiCount))) return makeSize(Number(m[1]), Number(m[2]), 'ud');
   if ((m = t.match(RE.count))) return makeSize(1, Number(m[1]), 'ud');
+  if ((m = t.match(RE.multiDozen))) return makeSize(Number(m[1]), m[3] ? 6 : Number(m[2] ?? 1) * 12, 'ud');
   if ((m = t.match(RE.dozens))) return makeSize(1, Number(m[1]) * 12, 'ud');
   if (RE.dozenAndHalf.test(t)) return makeSize(1, 18, 'ud');
   if (RE.halfDozen.test(t)) return makeSize(1, 6, 'ud');
