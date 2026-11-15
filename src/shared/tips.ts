@@ -174,48 +174,72 @@ function moreStoresTip(opt: Optimisation): Tip | null {
   };
 }
 
-function ownBrandTip(items: PlanItem[]): Tip | null {
+/** Nouns for a short list: "aceite", "aceite y leche", "aceite, leche y pan", "4 productos". */
+function nounList(items: PlanItem[]): string {
+  return items.length <= 3 ? joinNames(items.map(shortNoun)) : `${items.length} productos`;
+}
+
+/**
+ * Own brands, measured against what the plan buys (the split):
+ * - 'own-brand' (a saving to chase): an own-brand offer costs less than the
+ *   branded one the plan buys for an item;
+ * - 'own-brand-done' (no saving to chase, it is in the plan already): the plan
+ *   buys an own brand, and that costs less than the cheapest branded offer.
+ * A saving the plan already makes is never offered again as a switch.
+ */
+function ownBrandTips(items: PlanItem[], opt: Optimisation): Tip[] {
+  const lines = new Map(planLines(opt.split).map((l) => [l.itemId, l]));
   const wins: Array<{ item: PlanItem; saving: number; own: Offer; ownLabel: string; brand: string }> = [];
+  const done: Array<{ item: PlanItem; saving: number }> = [];
   for (const item of items) {
-    if (!(item.qty > 0) || isOwnBrand(item.wanted.brand)) continue;
+    const line = lines.get(item.id);
+    if (!line || !(item.qty > 0) || isOwnBrand(item.wanted.brand)) continue;
     const size = wantedSize(item.wanted);
-    let bestOwn: { offer: Offer; cents: number; label: string } | null = null;
-    let bestBrand: { offer: Offer; cents: number } | null = null;
-    for (const offer of Object.values(item.offers)) {
-      if (!offer || !(offer.priceCents > 0)) continue;
-      const cents = costFor(offer, size, item.qty).cents;
-      const own = ownBrandOf(offer);
-      if (own) {
-        if (!bestOwn || cents < bestOwn.cents) bestOwn = { offer, cents, label: own.label };
-      } else if (offer.brand) {
-        if (!bestBrand || cents < bestBrand.cents) bestBrand = { offer, cents };
-      }
+    const priced = Object.values(item.offers)
+      .filter((o): o is Offer => !!o && o.priceCents > 0)
+      .map((offer) => ({ offer, cents: costFor(offer, size, item.qty).cents, own: ownBrandOf(offer) }))
+      .sort((a, b) => a.cents - b.cents || (a.offer.chain < b.offer.chain ? -1 : 1));
+    if (ownBrandOf(line.offer)) {
+      const branded = priced.find((p) => !p.own && p.offer.brand);
+      if (branded && branded.cents > line.costCents) done.push({ item, saving: branded.cents - line.costCents });
+      continue;
     }
-    if (bestOwn && bestBrand && bestOwn.cents < bestBrand.cents) {
-      wins.push({
-        item,
-        saving: bestBrand.cents - bestOwn.cents,
-        own: bestOwn.offer,
-        ownLabel: bestOwn.label,
-        brand: bestBrand.offer.brand ?? item.wanted.brand ?? 'la marca',
-      });
+    // Only a branded line has a brand to switch from (fruit, bread from the counter...).
+    if (!line.offer.brand) continue;
+    const own = priced.find((p) => p.own);
+    if (own?.own && own.cents < line.costCents) {
+      wins.push({ item, saving: line.costCents - own.cents, own: own.offer, ownLabel: own.own.label, brand: line.offer.brand });
     }
   }
-  if (!wins.length) return null;
-  wins.sort((a, b) => b.saving - a.saving || (a.item.id < b.item.id ? -1 : 1));
-  const top = wins[0]!;
-  const total = wins.reduce((s, w) => s + w.saving, 0);
-  const label = top.ownLabel.toLowerCase() === chainName(top.own.chain).toLowerCase() ? '' : ` (${top.ownLabel})`;
-  const more = wins.length > 1
-    ? ` Con ${wins.length - 1} ${plural(wins.length - 1, 'producto', 'productos')} más, el ahorro sube a ${formatEuros(total)}.`
-    : '';
-  return {
-    id: 'own-brand',
-    icon: '🏷️',
-    title: 'Cambia a marca blanca',
-    body: `${chainName(top.own.chain)} tiene ${shortNoun(top.item)} de marca blanca${label} por ${formatEuros(top.saving)} menos que ${top.brand}.${more}`,
-    savingCents: total,
-  };
+  const byBiggest = <T extends { item: PlanItem; saving: number }>(a: T, b: T) => b.saving - a.saving || (a.item.id < b.item.id ? -1 : 1);
+  const tips: Tip[] = [];
+  if (wins.length) {
+    wins.sort(byBiggest);
+    const [top, ...rest] = wins as [typeof wins[number], ...typeof wins];
+    const total = wins.reduce((sum, w) => sum + w.saving, 0);
+    const label = top.ownLabel.toLowerCase() === chainName(top.own.chain).toLowerCase() ? '' : ` (${top.ownLabel})`;
+    const more = rest.length
+      ? ` Si también eliges marca blanca en ${rest.length <= 3 ? nounList(rest.map((w) => w.item)) : `otros ${rest.length} productos`}, el ahorro sube a ${formatEuros(total)}.`
+      : '';
+    tips.push({
+      id: 'own-brand',
+      icon: '🏷️',
+      title: 'Cambia a marca blanca',
+      body: `${chainName(top.own.chain)} tiene ${shortNoun(top.item)} de marca blanca${label} por ${formatEuros(top.saving)} menos que ${top.brand}.${more}`,
+      savingCents: total,
+    });
+  }
+  if (done.length) {
+    done.sort(byBiggest);
+    const total = done.reduce((sum, d) => sum + d.saving, 0);
+    tips.push({
+      id: 'own-brand-done',
+      icon: '💪',
+      title: 'Ya ahorras con la marca blanca',
+      body: `Tu plan ya ahorra ${formatEuros(total)} gracias a la marca blanca en ${nounList(done.map((d) => d.item))}.`,
+    });
+  }
+  return tips;
 }
 
 function missingTip(items: PlanItem[], opt: Optimisation): Tip | null {
@@ -372,9 +396,12 @@ const FILLERS: Tip[] = [
 export function savingTips(items: PlanItem[], opt: Optimisation, now: Date = new Date()): Tip[] {
   const active = items.filter((i) => Number.isFinite(i.qty) && i.qty > 0);
   if (!active.length) return [];
+  const own = ownBrandTips(active, opt);
+  const ownBrand = own.find((t) => t.id === 'own-brand') ?? null;
+  const ownBrandDone = own.find((t) => t.id === 'own-brand-done') ?? null;
   const candidates = [
     splitTip(opt),
-    ownBrandTip(active),
+    ownBrand,
     moreStoresTip(opt),
     missingTip(active, opt),
     singleTip(opt),
@@ -383,6 +410,7 @@ export function savingTips(items: PlanItem[], opt: Optimisation, now: Date = new
     promoTip(active, opt, now),
     leftoverTip(active, opt),
     unitPriceTip(active),
+    ownBrandDone,
   ].filter((t): t is Tip => t !== null);
 
   const tips = candidates

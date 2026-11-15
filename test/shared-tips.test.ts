@@ -61,7 +61,7 @@ const byId = (tips: Tip[], id: string) => tips.find((t) => t.id === id);
 describe('savingTips', () => {
   it('gives concrete tips with numbers, biggest saving first, at most 6', () => {
     const tips = savingTips(basket, optimise(basket), NOW);
-    expect(tips.map((t) => t.id)).toEqual(['split', 'own-brand', 'single', 'missing', 'promo', 'unit-price']);
+    expect(tips.map((t) => t.id)).toEqual(['split', 'single', 'missing', 'promo', 'unit-price', 'own-brand-done']);
     expect(byId(tips, 'split')).toEqual({
       id: 'split',
       icon: expect.any(String),
@@ -69,8 +69,14 @@ describe('savingTips', () => {
       body: eur('Repartir en 3 súper te ahorra 2,20 € (16 %) frente a comprarlo todo en Mercadona. Son unos 1,10 € por cada súper de más.'),
       savingCents: 220,
     });
-    expect(byId(tips, 'own-brand')!.body).toBe(eur('Aldi tiene aceite de marca blanca por 1,50 € menos que Carbonell.'));
-    expect(byId(tips, 'own-brand')!.savingCents).toBe(150);
+    // The plan already buys Aldi's own-brand oil: no switch to chase, a well-done note instead.
+    expect(byId(tips, 'own-brand')).toBeUndefined();
+    expect(byId(tips, 'own-brand-done')).toEqual({
+      id: 'own-brand-done',
+      icon: expect.any(String),
+      title: 'Ya ahorras con la marca blanca',
+      body: eur('Tu plan ya ahorra 1,50 € gracias a la marca blanca en aceite.'),
+    });
     expect(byId(tips, 'single')!.body).toBe(eur('Elige Mercadona: todo lo que tiene precio por 13,63 €, 1,49 € menos que en Aldi.'));
     expect(byId(tips, 'missing')!.body).toContain('Bebida de avena');
     expect(byId(tips, 'promo')!.body).toBe('La oferta de Aldi en aceite acaba el 21/11 (en 6 días).');
@@ -185,7 +191,9 @@ describe('savingTips', () => {
     expect(byId(savingTips(fits, optimise(fits), NOW), 'leftover')).toBeUndefined();
   });
 
-  it('adds up own-brand savings over several items', () => {
+  // Regression (shared-12, heuristics-3): the own-brand tip asked to switch to
+  // own brands the plan already bought, repeating a saving another tip counts.
+  it('suggests own brands the plan does not buy yet, measured against what it buys', () => {
     const items = [
       it_('aceite', 'Aceite de girasol', 1, { brand: 'Koipesol', sizeText: '1 L' }, [
         o('mercadona', 'Aceite de girasol', 'Hacendado', '1 L', 180),
@@ -193,12 +201,31 @@ describe('savingTips', () => {
       ]),
       it_('tomate', 'Tomate frito', 2, { brand: 'Orlando', sizeText: '350 g' }, [
         o('lidl', 'Tomate frito', 'Lidl', '350 g', 60),
-        o('alcampo', 'Tomate frito Orlando', 'Orlando', '350 g', 110),
+        o('carrefour', 'Tomate frito Orlando', 'Orlando', '350 g', 110),
       ]),
     ];
-    const tip = byId(savingTips(items, optimise(items), NOW), 'own-brand')!;
-    expect(tip.body).toBe(eur('Mercadona tiene aceite de marca blanca (Hacendado) por 1,20 € menos que Koipesol. Con 1 producto más, el ahorro sube a 2,20 €.'));
+    // One store: Carrefour, with both brands.
+    const capped = savingTips(items, optimise(items, { cap: 1 }), NOW);
+    const tip = byId(capped, 'own-brand')!;
+    expect(tip.body).toBe(eur('Mercadona tiene aceite de marca blanca (Hacendado) por 1,20 € menos que Koipesol. Si también eliges marca blanca en tomate, el ahorro sube a 2,20 €.'));
     expect(tip.savingCents).toBe(220);
+    expect(byId(capped, 'own-brand-done')).toBeUndefined();
+    // No limit: the plan buys both own brands already.
+    const free = savingTips(items, optimise(items), NOW);
+    expect(byId(free, 'own-brand')).toBeUndefined();
+    expect(byId(free, 'own-brand-done')!.body).toBe(eur('Tu plan ya ahorra 2,20 € gracias a la marca blanca en aceite y tomate.'));
+    expect(byId(free, 'own-brand-done')!.savingCents).toBeUndefined();
+  });
+
+  it('does not count an own-brand saving twice when the plan buys it', () => {
+    const items = [it_('leche', 'Leche entera Pascual', 2, { brand: 'Pascual', sizeText: '1 L' }, [
+      o('mercadona', 'Leche entera', 'Hacendado', '1 L', 89),
+      o('carrefour', 'Leche entera Pascual', 'Pascual', '1 L', 125),
+    ])];
+    const tips = savingTips(items, optimise(items), NOW);
+    expect(byId(tips, 'own-brand')).toBeUndefined();
+    expect(tips.filter((t) => t.savingCents === 72).map((t) => t.id)).toEqual(['single']);
+    expect(byId(tips, 'own-brand-done')!.body).toBe(eur('Tu plan ya ahorra 0,72 € gracias a la marca blanca en leche.'));
   });
 
   it('says when no chain has everything (equal coverage: the cheaper chain)', () => {
