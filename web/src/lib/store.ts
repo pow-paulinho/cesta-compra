@@ -23,6 +23,12 @@ export interface Hunt {
   chains: Partial<Record<ChainId, ChainHunt>>;
   error?: string;
   queuedAt: number;
+  /** Whether the hunt asked for demo prices (absent on hunts saved before this was recorded). */
+  demo?: boolean;
+  /** A retry of some chains only: the others keep their answers. */
+  only?: ChainId[];
+  /** What the item had before this hunt was queued, put back if it is cancelled or fails. */
+  prev?: { chains: Partial<Record<ChainId, ChainHunt>>; choice: Partial<Record<ChainId, string>> };
 }
 
 export type CartProduct = Pick<Product, 'key' | 'name' | 'brand' | 'sizeText' | 'ean' | 'image' | 'offers'>;
@@ -136,24 +142,49 @@ export function setState(update: (s: State) => State) {
   if (!saveTimer) saveTimer = setTimeout(persist, 120);
 }
 
-if (typeof window !== 'undefined') {
-  window.addEventListener('pagehide', () => saveTimer && persist());
+/** The item whose hunt this tab is running right now (set by hunt.ts). */
+let runningHere: () => string | null = () => null;
+
+/** Lets the hunt queue say which item it is running, so another tab's copy never overwrites it. */
+export function setRunningHere(fn: () => string | null) {
+  runningHere = fn;
+}
+
+/**
+ * Another tab's state, minus its copy of the hunt this tab is running: that copy is older
+ * than ours (it only knows what we last saved). It wins only when the other tab acted on
+ * that hunt: it cancelled it or queued it again (a new queuedAt).
+ */
+export function mergeIncoming(local: State, incoming: State, runningId: string | null): State {
+  if (!runningId) return incoming;
+  const mine = local.cart.find((i) => i.id === runningId);
+  const theirs = incoming.cart.find((i) => i.id === runningId);
+  if (!mine || !theirs || mine.hunt.status !== 'running') return incoming;
+  if (theirs.hunt.queuedAt !== mine.hunt.queuedAt || theirs.hunt.status === 'cancelled') return incoming;
+  return { ...incoming, cart: incoming.cart.map((i) => (i.id === runningId ? { ...i, hunt: mine.hunt, choice: mine.choice } : i)) };
+}
+
+/** The browser window, typed loosely so this module also typechecks (and runs) in the tests. */
+const win = (globalThis as { window?: { addEventListener(type: string, fn: (e: { key: string | null }) => void): void } }).window;
+
+if (win) {
+  win.addEventListener('pagehide', () => saveTimer && persist());
   // Another tab changed the cart: follow it.
-  window.addEventListener('storage', (e) => {
+  win.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
-    state = load();
+    state = mergeIncoming(state, load(), runningHere());
     listeners.forEach((l) => l());
   });
 }
 
+/** Calls `l` after every change of state (this tab's or another tab's). */
+export function subscribe(l: () => void): () => void {
+  listeners.add(l);
+  return () => listeners.delete(l);
+}
+
 export function useStore<T>(select: (s: State) => T): T {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
-    },
-    () => select(state),
-  );
+  return useSyncExternalStore(subscribe, () => select(state));
 }
 
 // ---------------------------------------------------------------------------
