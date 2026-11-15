@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from '../src/index';
-import type { LiveDeps } from '../src/live/common';
+import { failure, type LiveDeps } from '../src/live/common';
 import { handleDetails } from '../src/live/details';
 import type { CatalogueRow } from '../src/live/fallback';
 import { handleHunt, huntQuery, parseHunt, stripSize } from '../src/live/hunt';
@@ -9,7 +9,7 @@ import { handleSearch } from '../src/live/search';
 import { CHAINS } from '../src/shared/chains';
 import type { ChainId, HuntEvent, Offer, Product, SearchEvent } from '../src/shared/types';
 import { CACHE_HEADER, HostSpacer, makePoliteFetch } from '../src/sources/live/http';
-import { BlockedError, type AdapterCtx, type ChainAdapter } from '../src/sources/live/types';
+import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter } from '../src/sources/live/types';
 
 const NOW = new Date('2026-11-15T12:00:00Z');
 const KEY = 'clave-de-prueba';
@@ -333,7 +333,7 @@ describe('POST /api/hunt: one answer per chain', () => {
     // Exact mode drops the weak yogurt.
     expect(by.get('alcampo')!.candidates.map((c) => c.id)).toEqual(['alcampo-1']);
     expect(by.get('aldi')).toMatchObject({ status: 'error', candidates: [], pick: null });
-    expect(by.get('aldi')!.reason).toContain('page without product state');
+    expect(by.get('aldi')!.reason).toBe('Aldi ha respondido algo que no sabemos leer; puede que haya cambiado su web.');
     expect(by.get('ahorramas')).toMatchObject({ status: 'blocked', pick: null });
     expect(by.get('carrefour')!.status).toBe('ok');
   });
@@ -438,5 +438,28 @@ describe('GET /api/details', () => {
     }));
     expect(bad.status).toBe(502);
     expect(await bad.json()).toMatchObject({ details: null });
+  });
+});
+
+describe('failure reasons shown to the user', () => {
+  it('never carry runtime internals or raw error text, only a Spanish sentence (and the HTTP status)', () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const internal = failure(new Error('internal error; reference = 9a8b7c6d5e4f3a2b1c0d'), 'Aldi');
+      expect(internal).toEqual({ status: 'error', reason: 'No hemos podido leer Aldi por un fallo interno. Prueba otra vez en un momento.' });
+      const d1 = failure(new Error('D1_ERROR: no such table: prices: SQLITE_ERROR'), 'el catálogo');
+      expect(d1.reason).not.toMatch(/D1_ERROR|SQLITE|prices/);
+      expect(failure(new Error('Network connection lost.'), 'Ahorramas').reason).toBe('No hemos podido conectar con Ahorramas. Prueba otra vez en un rato.');
+      const http = failure(new Error('HTTP 503 for https://www.aldi.es/producto/leche-de-coco-634603.html'), 'Aldi');
+      expect(http.reason).toBe('Aldi no está respondiendo bien ahora mismo (HTTP 503). Prueba otra vez en un rato.');
+      expect(http.reason).not.toContain('https://');
+      expect(failure(new Error('openfoodfacts: search answered something that is not JSON'), 'Open Food Facts').reason).toContain('no sabemos leer');
+      expect(failure(new SourceError('rate window full', 'Espera un minuto.'), 'Open Food Facts')).toEqual({ status: 'error', reason: 'Espera un minuto.' });
+      expect(failure(new BlockedError(429), 'Alcampo')).toMatchObject({ status: 'blocked' });
+      // The raw text still reaches the log, for the owner.
+      expect(quiet.mock.calls.map((c) => String(c[0])).join('\n')).toContain('internal error; reference = 9a8b7c6d5e4f3a2b1c0d');
+    } finally {
+      quiet.mockRestore();
+    }
   });
 });

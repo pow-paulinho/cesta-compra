@@ -8,7 +8,7 @@ import { CHAINS } from '../shared/chains';
 import type { ChainId, ChainStatus, Offer, Product } from '../shared/types';
 import { BudgetError, TimeoutError, defaultCache, makePoliteFetch, type PoliteFetchWithStats } from '../sources/live/http';
 import { LIVE_ADAPTERS, OFF, type CatalogueProvider } from '../sources/live/index';
-import { BlockedError, type AdapterCtx, type ChainAdapter } from '../sources/live/types';
+import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter } from '../sources/live/types';
 
 /** Page requests one chain may get per search or hunt (index requests are counted apart). */
 export const REQUESTS_PER_CHAIN = 4;
@@ -107,10 +107,21 @@ export function isBlocked(err: unknown): boolean {
 
 const shortMessage = (err: unknown): string => {
   const m = err instanceof Error ? err.message : String(err);
-  return m.replace(/\s+/g, ' ').trim().slice(0, 140);
+  return m.replace(/\s+/g, ' ').trim().slice(0, 300);
 };
 
-/** A failure as a status and a reason in Spanish (with the technical cause in brackets). */
+/** "HTTP 503" in one of our own error messages ("aldi: HTTP 503", "HTTP 503 for https://…"). */
+const HTTP_IN_MESSAGE = /\bHTTP (\d{3})\b/;
+/** Our own messages for an answer that came back but could not be read. */
+const UNREADABLE = /not JSON|without product state|without product URLs|sitemap not found|unparseable|cannot be read/i;
+/** Connection-level failures of the runtime's fetch. */
+const NETWORK = /network|connection|fetch failed|socket|ECONN|ENOTFOUND|EAI_AGAIN|dns/i;
+
+/**
+ * A failure as a status and a reason in Spanish. The reason never carries raw error text
+ * (runtime internals such as "internal error; reference = …", D1 or SQLite messages):
+ * only a sentence of ours, at most with the HTTP status. The raw message goes to the log.
+ */
 export function failure(err: unknown, label: string): { status: ChainStatus; reason: string } {
   if (isBlocked(err)) {
     const s = httpStatusOf(err);
@@ -122,7 +133,26 @@ export function failure(err: unknown, label: string): { status: ChainStatus; rea
   if (err instanceof BudgetError) {
     return { status: 'error', reason: `Hemos parado tras ${err.max} consultas a ${label} para no cargar su web.` };
   }
-  return { status: 'error', reason: `No hemos podido leer ${label} (${shortMessage(err)}).` };
+  const userReason = (err as { userReason?: unknown } | null)?.userReason;
+  if (err instanceof SourceError || (typeof userReason === 'string' && userReason)) {
+    return { status: 'error', reason: String(userReason) };
+  }
+  const raw = shortMessage(err);
+  console.error(`${label}: ${raw}`);
+  const status = httpStatusOf(err) ?? Number(HTTP_IN_MESSAGE.exec(raw)?.[1] ?? NaN);
+  if (Number.isInteger(status) && status >= 500) {
+    return { status: 'error', reason: `${label} no está respondiendo bien ahora mismo (HTTP ${status}). Prueba otra vez en un rato.` };
+  }
+  if (Number.isInteger(status) && status >= 400) {
+    return { status: 'error', reason: `${label} ha respondido con un error (HTTP ${status}).` };
+  }
+  if (UNREADABLE.test(raw)) {
+    return { status: 'error', reason: `${label} ha respondido algo que no sabemos leer; puede que haya cambiado su web.` };
+  }
+  if (NETWORK.test(raw)) {
+    return { status: 'error', reason: `No hemos podido conectar con ${label}. Prueba otra vez en un rato.` };
+  }
+  return { status: 'error', reason: `No hemos podido leer ${label} por un fallo interno. Prueba otra vez en un momento.` };
 }
 
 /** Offers of one source grouped into product cards (same EAN, or same brand, name and size). */
