@@ -342,7 +342,9 @@ export function failure(err: unknown, label: string): { status: ChainStatus; rea
   }
   if (isBlocked(err)) {
     const s = httpStatusOf(err);
-    return { status: 'blocked', reason: `${label} ha rechazado la consulta automática${s ? ` (HTTP ${s})` : ''}: no insistimos.` };
+    // A challenge page arrives with any status (often 200): only a refusal status is worth showing.
+    const shown = s === 403 || s === 429 ? ` (HTTP ${s})` : '';
+    return { status: 'blocked', reason: `${label} ha rechazado la consulta automática${shown}: no insistimos.` };
   }
   if (err instanceof DeadlineError || err instanceof TimeoutError) {
     return { status: 'error', reason: `${label} no ha respondido a tiempo. Prueba otra vez en un rato.` };

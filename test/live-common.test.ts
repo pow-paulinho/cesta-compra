@@ -83,7 +83,9 @@ describe('a source that refused us is left alone for a while', () => {
 
   it('a challenge page served with 200 counts as a refusal too', async () => {
     const r = rig((url) => (url === ALDI_SITEMAP_URL ? new Response(CHALLENGE) : new Response(PRODUCT)), { blocks: new BlockBook() });
-    await expect(runAdapter(aldi, 'leche', r.deps)).rejects.toBeInstanceOf(BlockedError);
+    const first = await runAdapter(aldi, 'leche', r.deps).catch((e: unknown) => e);
+    expect(first).toBeInstanceOf(BlockedError);
+    expect(failure(first, 'Aldi')).toEqual({ status: 'blocked', reason: 'Aldi ha rechazado la consulta automática: no insistimos.' });
     await expect(runAdapter(aldi, 'leche', r.deps)).rejects.toBeInstanceOf(StillBlockedError);
     expect(r.sent).toHaveLength(1);
   });
