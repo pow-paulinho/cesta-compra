@@ -157,13 +157,19 @@ function moreStoresTip(opt: Optimisation): Tip | null {
   const delta = split.totalCents - all.totalCents;
   if (all.stores <= split.stores || all.missing.length > split.missing.length || delta < 50) return null;
   const now = new Set(split.stops.map((s) => s.chain));
+  const then = new Set(all.stops.map((s) => s.chain));
   const added = all.stops.map((s) => s.chain).filter((c) => !now.has(c));
+  // The bigger plan may leave out a store of the current one: then it is a swap, not "also".
+  const dropped = split.stops.map((s) => s.chain).filter((c) => !then.has(c));
   if (!added.length) return null;
+  const body = dropped.length
+    ? `Si cambias ${joinNames(dropped.map(chainName))} por ${joinNames(added.map(chainName))}, ahorras ${formatEuros(delta)} más.`
+    : `Si pasas también por ${joinNames(added.map(chainName))}, ahorras otros ${formatEuros(delta)}.`;
   return {
     id: 'more-stores',
     icon: '🗺️',
-    title: plural(added.length, 'Un súper más compensa', 'Ir a más súper compensa'),
-    body: `Si pasas también por ${joinNames(added.map(chainName))}, ahorras otros ${formatEuros(delta)}.`,
+    title: plural(all.stores - split.stores, 'Un súper más compensa', 'Ir a más súper compensa'),
+    body,
     savingCents: delta,
   };
 }

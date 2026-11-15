@@ -98,6 +98,23 @@ describe('savingTips', () => {
     expect(byId(tips, 'split')).toBeUndefined();
   });
 
+  // Regression (shared-11): "también" was said even when the bigger plan drops
+  // the store the current plan uses.
+  it('words more stores as a swap when the bigger plan leaves the current store out', () => {
+    const items = [
+      it_('leche', 'Leche', 1, { sizeText: '1 L' }, [o('aldi', 'Leche', null, '1 L', 150), o('bm', 'Leche', null, '1 L', 100), o('carrefour', 'Leche', null, '1 L', 400)]),
+      it_('pan', 'Pan', 1, { sizeText: '1 L' }, [o('aldi', 'Pan', null, '1 L', 150), o('bm', 'Pan', null, '1 L', 400), o('carrefour', 'Pan', null, '1 L', 100)]),
+    ];
+    const opt = optimise(items, { cap: 1 });
+    expect(opt.split.stops.map((s) => s.chain)).toEqual(['aldi']);
+    expect(opt.byCap.all.stops.map((s) => s.chain).sort()).toEqual(['bm', 'carrefour']);
+    expect(byId(savingTips(items, opt, NOW), 'more-stores')).toMatchObject({
+      title: 'Un súper más compensa',
+      body: eur('Si cambias Aldi por BM y Carrefour, ahorras 1,00 € más.'),
+      savingCents: 100,
+    });
+  });
+
   it('is deterministic', () => {
     const a = savingTips(basket, optimise(basket), NOW);
     const b = savingTips(basket.map((x) => ({ ...x })), optimise(basket), new Date(NOW));
