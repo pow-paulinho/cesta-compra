@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { constantTimeEqual, liveAccess, liveAllowed, lockedReason } from '../src/live/auth';
 import worker, { type Env } from '../src/index';
+import { KeyThrottle, WRONG_KEY_LIMIT, WRONG_KEY_WINDOW_MS } from '../src/live/auth';
 
 const req = (key?: string) => new Request('https://x.test/api/live', { headers: key === undefined ? {} : { 'x-live-key': key } });
 
@@ -64,3 +65,42 @@ describe('the live key', () => {
     for (const c of body.chains) if (c.mode === 'fallback') expect(c.reason).toBeTruthy();
   });
 });
+
+describe('guessing the key online', () => {
+  const from = (ip: string, path: string, key: string) => new Request(`https://x.test${path}`, { headers: { 'x-live-key': key, 'cf-connecting-ip': ip } });
+
+  it('after 10 wrong keys a client gets 429 on every route that reads the key; others are not affected', async () => {
+    const env = { LIVE_KEY: 'una-clave-larga-y-secreta' } as Env;
+    for (let i = 0; i < WRONG_KEY_LIMIT; i++) {
+      const res = await worker.fetch(from('203.0.113.7', '/api/live', `intento-${i}`), env);
+      expect(((await res.json()) as { access: string }).access).toBe('wrong');
+    }
+    for (const path of ['/api/live', '/api/search?q=leche']) {
+      const res = await worker.fetch(from('203.0.113.7', path, 'una-clave-larga-y-secreta'), env);
+      expect(res.status).toBe(429);
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+      expect(((await res.json()) as { error: string }).error).toContain('Demasiados intentos');
+    }
+    const hunt = await worker.fetch(new Request('https://x.test/api/hunt', {
+      method: 'POST', body: '{}', headers: { 'x-live-key': 'otra', 'cf-connecting-ip': '203.0.113.7' },
+    }), env);
+    expect(hunt.status).toBe(429);
+    // Another client, and the same client without a key, still get their answers.
+    const other = await worker.fetch(from('198.51.100.20', '/api/live', 'una-clave-larga-y-secreta'), env);
+    expect(((await other.json()) as { access: string }).access).toBe('ok');
+    const noKey = await worker.fetch(new Request('https://x.test/api/live', { headers: { 'cf-connecting-ip': '203.0.113.7' } }), env);
+    expect(noKey.status).toBe(200);
+  });
+
+  it('the right key never counts, and old attempts leave the window', () => {
+    const t = new KeyThrottle(3, 1000);
+    t.recordWrong('a', 0);
+    t.recordWrong('a', 100);
+    expect(t.waitMs('a', 200)).toBe(0);
+    t.recordWrong('a', 200);
+    expect(t.waitMs('a', 300)).toBe(700);
+    expect(t.waitMs('a', 1000)).toBe(0);
+    expect(WRONG_KEY_WINDOW_MS).toBe(15 * 60_000);
+  });
+});
+

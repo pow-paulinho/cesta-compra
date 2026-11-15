@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from '../src/index';
-import type { LiveDeps } from '../src/live/common';
+import { failure, type LiveDeps } from '../src/live/common';
 import { handleDetails } from '../src/live/details';
 import type { CatalogueRow } from '../src/live/fallback';
 import { handleHunt, huntQuery, parseHunt, stripSize } from '../src/live/hunt';
@@ -9,7 +10,8 @@ import { handleSearch } from '../src/live/search';
 import { CHAINS } from '../src/shared/chains';
 import type { ChainId, HuntEvent, Offer, Product, SearchEvent } from '../src/shared/types';
 import { CACHE_HEADER, HostSpacer, makePoliteFetch } from '../src/sources/live/http';
-import { BlockedError, type AdapterCtx, type ChainAdapter } from '../src/sources/live/types';
+import { createOpenFoodFacts } from '../src/sources/live/openfoodfacts';
+import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter } from '../src/sources/live/types';
 
 const NOW = new Date('2026-11-15T12:00:00Z');
 const KEY = 'clave-de-prueba';
@@ -333,7 +335,7 @@ describe('POST /api/hunt: one answer per chain', () => {
     // Exact mode drops the weak yogurt.
     expect(by.get('alcampo')!.candidates.map((c) => c.id)).toEqual(['alcampo-1']);
     expect(by.get('aldi')).toMatchObject({ status: 'error', candidates: [], pick: null });
-    expect(by.get('aldi')!.reason).toContain('page without product state');
+    expect(by.get('aldi')!.reason).toBe('Aldi ha respondido algo que no sabemos leer; puede que haya cambiado su web.');
     expect(by.get('ahorramas')).toMatchObject({ status: 'blocked', pick: null });
     expect(by.get('carrefour')!.status).toBe('ok');
   });
@@ -438,5 +440,239 @@ describe('GET /api/details', () => {
     }));
     expect(bad.status).toBe(502);
     expect(await bad.json()).toMatchObject({ details: null });
+  });
+});
+
+describe('failure reasons shown to the user', () => {
+  it('never carry runtime internals or raw error text, only a Spanish sentence (and the HTTP status)', () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const internal = failure(new Error('internal error; reference = 9a8b7c6d5e4f3a2b1c0d'), 'Aldi');
+      expect(internal).toEqual({ status: 'error', reason: 'No hemos podido leer Aldi por un fallo interno. Prueba otra vez en un momento.' });
+      const d1 = failure(new Error('D1_ERROR: no such table: prices: SQLITE_ERROR'), 'el catálogo');
+      expect(d1.reason).not.toMatch(/D1_ERROR|SQLITE|prices/);
+      expect(failure(new Error('Network connection lost.'), 'Ahorramas').reason).toBe('No hemos podido conectar con Ahorramas. Prueba otra vez en un rato.');
+      const http = failure(new Error('HTTP 503 for https://www.aldi.es/producto/leche-de-coco-634603.html'), 'Aldi');
+      expect(http.reason).toBe('Aldi no está respondiendo bien ahora mismo (HTTP 503). Prueba otra vez en un rato.');
+      expect(http.reason).not.toContain('https://');
+      expect(failure(new Error('openfoodfacts: search answered something that is not JSON'), 'Open Food Facts').reason).toContain('no sabemos leer');
+      expect(failure(new SourceError('rate window full', 'Espera un minuto.'), 'Open Food Facts')).toEqual({ status: 'error', reason: 'Espera un minuto.' });
+      expect(failure(new BlockedError(429), 'Alcampo')).toMatchObject({ status: 'blocked' });
+      // The raw text still reaches the log, for the owner.
+      expect(quiet.mock.calls.map((c) => String(c[0])).join('\n')).toContain('internal error; reference = 9a8b7c6d5e4f3a2b1c0d');
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+});
+
+/** A body streamed in 16 KB chunks, `total` bytes in all, counting what was pulled. */
+function streamedBody(total: number) {
+  const pulled = { bytes: 0, cancelled: false };
+  const chunk = new Uint8Array(16 * 1024).fill(0x20);
+  const body = new ReadableStream<Uint8Array>({
+    pull(c) {
+      if (pulled.bytes >= total) return c.close();
+      pulled.bytes += chunk.byteLength;
+      c.enqueue(chunk);
+    },
+    cancel() {
+      pulled.cancelled = true;
+    },
+  });
+  return { body, pulled };
+}
+const post = (path: string, body: BodyInit, headers: Record<string, string> = {}) =>
+  new Request(`https://x.test${path}`, { method: 'POST', body, headers, duplex: 'half' } as RequestInit);
+
+describe('request bodies are read only up to their limit', () => {
+  it('/api/hunt refuses a large declared Content-Length before reading anything', async () => {
+    const { body, pulled } = streamedBody(64 * 1024 * 1024);
+    const res = await worker.fetch(post('/api/hunt', body, { 'content-length': String(64 * 1024 * 1024) }), { DB: fakeDb().db } as Env);
+    expect(res.status).toBe(413);
+    expect(pulled.bytes).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it('/api/hunt stops reading a body without Content-Length once it passes 8 KB', async () => {
+    const { body, pulled } = streamedBody(64 * 1024 * 1024);
+    const res = await worker.fetch(post('/api/hunt', body), { DB: fakeDb().db } as Env);
+    expect(res.status).toBe(413);
+    expect(pulled.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect(pulled.cancelled).toBe(true);
+  });
+
+  it('/api/checkout has a limit too, and still answers 400 for JSON it does not accept', async () => {
+    const { body, pulled } = streamedBody(64 * 1024 * 1024);
+    const res = await worker.fetch(post('/api/checkout', body), {} as Env);
+    expect(res.status).toBe(413);
+    expect(pulled.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect((await worker.fetch(post('/api/checkout', 'no es json'), {} as Env)).status).toBe(400);
+  });
+});
+
+describe('a failing D1 on the older routes', () => {
+  const broken = {
+    prepare: () => {
+      throw new Error('D1_ERROR: no such table: prices: SQLITE_ERROR');
+    },
+    batch: async () => {
+      throw new Error('D1_ERROR: no such table: prices: SQLITE_ERROR');
+    },
+  } as unknown as D1Database;
+
+  it('answers JSON with a Spanish error, never the raw message or the runtime error page', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const requests = [
+        new Request('https://x.test/api/status'),
+        new Request('https://x.test/api/products?q=leche'),
+        post('/api/checkout', JSON.stringify({ items: [{ ean: '8076809579346', qty: 1 }], source: 'open_prices' })),
+      ];
+      for (const req of requests) {
+        const res = await worker.fetch(req, { DB: broken } as Env);
+        expect(res.status).toBe(503);
+        expect(res.headers.get('content-type')).toContain('application/json');
+        const body = (await res.json()) as { error: string };
+        expect(body.error).toBe('El catálogo de precios no está disponible ahora mismo. Vuelve a intentarlo en un momento.');
+      }
+      expect(quiet).toHaveBeenCalled();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+});
+
+describe('calling off an adapter', () => {
+  /** An adapter that asks for one page after another through ctx.fetch, as Aldi's loop does. */
+  function looping(chain: ChainId, pages: number) {
+    return fakeAdapter(chain, async (_q, ctx) => {
+      for (let i = 0; i < pages; i++) {
+        const res = await ctx.fetch(`https://shop.test/p/${i}`, { kind: 'detail' });
+        await res.text();
+      }
+      return [offer(chain)];
+    });
+  }
+  function slowNetwork(ms: number) {
+    const sent: Array<{ url: string; signal: AbortSignal | null }> = [];
+    const doFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: String(input), signal: init?.signal ?? null });
+      await later(ms, null);
+      if (init?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      return new Response('<html></html>');
+    }) as typeof fetch;
+    return { sent, doFetch };
+  }
+
+  it('sends no request after the deadline, and cancels the one in flight', async () => {
+    const net = slowNetwork(30);
+    const aldi = looping('aldi', 10);
+    const d = deps({
+      adapters: { aldi: aldi.adapter },
+      deadlineMs: 50,
+      fetchFor: (namespace) => makePoliteFetch({ doFetch: net.doFetch, namespace, spacer: new HostSpacer({ spacingMs: 0 }) }),
+    });
+    const list = await events<SearchEvent>(handleSearch(searchReq('leche', KEY), { DB: fakeDb().db, LIVE_KEY: KEY }, d));
+    expect(list.find((e) => e.type === 'source' && e.source === 'aldi')).toMatchObject({ status: 'error' });
+    const atAnswer = net.sent.length;
+    expect(atAnswer).toBeLessThanOrEqual(2);
+    await later(200, null);
+    expect(net.sent.length).toBe(atAnswer);
+    expect(net.sent.at(-1)!.signal!.aborted).toBe(true);
+  });
+
+  it('stops asking the shops when the client goes away', async () => {
+    const net = slowNetwork(20);
+    const aldi = looping('aldi', 50);
+    const d = deps({
+      adapters: { aldi: aldi.adapter },
+      deadlineMs: 10_000,
+      fetchFor: (namespace) => makePoliteFetch({ doFetch: net.doFetch, namespace, spacer: new HostSpacer({ spacingMs: 0 }) }),
+    });
+    const res = handleSearch(searchReq('leche', KEY), { DB: fakeDb().db, LIVE_KEY: KEY }, d);
+    const reader = res.body!.getReader();
+    await reader.read();
+    await later(50, null);
+    await reader.cancel();
+    await later(60, null);
+    const afterCancel = net.sent.length;
+    await later(200, null);
+    expect(net.sent.length).toBe(afterCancel);
+    expect(afterCancel).toBeLessThan(50);
+  });
+});
+
+describe('Open Food Facts answering 503 now and then', () => {
+  const UNAVAILABLE = readFileSync(new URL('./fixtures/openfoodfacts/unavailable-503.html', import.meta.url), 'utf8');
+  const unavailable = (headers: Record<string, string> = {}) => () => new Response(UNAVAILABLE, { status: 503, headers: { 'content-type': 'text/html', ...headers } });
+  const found = () => Response.json({ products: [{ code: '8410128796228', product_name: 'Leche entera', brands: 'Pascual', quantity: '1 l' }] });
+  function offRig(answers: Array<() => Response>) {
+    const sent: string[] = [];
+    const sleeps: number[] = [];
+    const doFetch = (async (input: RequestInfo | URL) => {
+      sent.push(String(input));
+      return answers[Math.min(sent.length - 1, answers.length - 1)]!();
+    }) as typeof fetch;
+    const d = deps({
+      off: createOpenFoodFacts(),
+      sleep: async (ms) => { sleeps.push(ms); },
+      fetchFor: (namespace) => makePoliteFetch({ doFetch, namespace, spacer: new HostSpacer({ spacingMs: 0 }) }),
+    });
+    return { d, sent, sleeps };
+  }
+  const offEvent = async (d: LiveDeps) => (await events<SearchEvent>(handleSearch(searchReq('leche'), {}, d)))
+    .find((e) => e.type === 'source' && e.source === 'openfoodfacts') as Extract<SearchEvent, { type: 'source' }>;
+
+  it('search asks once more after 1.5 s and shows the products', async () => {
+    const r = offRig([unavailable(), found]);
+    const e = await offEvent(r.d);
+    expect(e).toMatchObject({ status: 'ok' });
+    expect(e.products.map((p) => p.ean)).toEqual(['8410128796228']);
+    expect(r.sent).toHaveLength(2);
+    expect(r.sent[1]).toBe(r.sent[0]);
+    expect(r.sleeps).toEqual([1500]);
+  });
+
+  it('a second 503 is an error in Spanish, after exactly one retry', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const r = offRig([unavailable()]);
+      const e = await offEvent(r.d);
+      expect(e).toMatchObject({ status: 'error', reason: 'Open Food Facts no está respondiendo bien ahora mismo (HTTP 503). Prueba otra vez en un rato.' });
+      expect(r.sent).toHaveLength(2);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('waits for a short Retry-After, and gives up at once on a long one or a refusal', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const short = offRig([unavailable({ 'retry-after': '3' }), found]);
+      expect((await offEvent(short.d)).status).toBe('ok');
+      expect(short.sleeps).toEqual([3000]);
+      const long = offRig([unavailable({ 'retry-after': '120' }), found]);
+      expect((await offEvent(long.d)).status).toBe('error');
+      expect(long.sent).toHaveLength(1);
+      const refused = offRig([() => new Response('Too Many Requests', { status: 429 }), found]);
+      expect((await offEvent(refused.d)).status).toBe('blocked');
+      expect(refused.sent).toHaveLength(1);
+      expect(refused.sleeps).toEqual([]);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('details are asked once more too', async () => {
+    const r = offRig([unavailable(), () => Response.json({ status: 1, product: { code: '8410128796228', nutriscore_grade: 'b' } })]);
+    const res = await handleDetails(new Request('https://x.test/api/details?ean=8410128796228'), r.d);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { details: { nutriscore: string } }).details.nutriscore).toBe('b');
+    expect(r.sent).toHaveLength(2);
+  });
+
+  it('a full rate window is explained in Spanish', () => {
+    expect(failure(new Error('openfoodfacts: 10 searches a minute reached, try again in a minute'), 'Open Food Facts').reason)
+      .toBe('Open Food Facts solo admite unas pocas consultas por minuto: espera un minuto y vuelve a probar.');
   });
 });

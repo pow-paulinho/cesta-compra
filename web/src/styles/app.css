@@ -8,6 +8,24 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  /* Keep whatever gets focus or scrolled to clear of the sticky header and the fixed tab bar
+     (WCAG 2.4.11): the browser scrolls a little further so nothing ends up underneath. */
+  scroll-padding-top: calc(var(--header-h) + 8px);
+  scroll-padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 8px);
+}
+
+html:has(.dock .hunt-pill, .dock .toast) {
+  scroll-padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom) + var(--dock-h) + 8px);
+}
+
+@media (min-width: 768px) {
+  html {
+    scroll-padding-bottom: 8px;
+  }
+
+  html:has(.dock .hunt-pill, .dock .toast) {
+    scroll-padding-bottom: calc(var(--dock-h) + 24px);
+  }
 }
 
 body {
@@ -71,7 +89,7 @@ a {
 }
 
 :focus-visible {
-  outline: 3px solid var(--blue);
+  outline: 3px solid var(--focus);
   outline-offset: 2px;
   border-radius: 10px;
 }
@@ -227,7 +245,7 @@ a {
 }
 
 .icon-btn:active {
-  transform: scale(0.94);
+  transform: scale(var(--press));
 }
 
 @media (hover: hover) {
@@ -279,6 +297,7 @@ a {
   width: 52px;
   height: 34px;
   border-radius: 12px;
+  transition: transform var(--dur-fast) var(--ease-out);
 }
 
 .tab-indicator {
@@ -294,7 +313,7 @@ a {
 }
 
 .tabbar a:active .tab-icon {
-  transform: scale(0.94);
+  transform: scale(var(--press));
 }
 
 .badge {
@@ -462,9 +481,13 @@ a {
 }
 
 .input:focus {
-  outline: none;
   border-color: var(--blue);
   background: var(--bg);
+}
+
+.input:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .search-form {
@@ -573,6 +596,48 @@ a {
   border-color: var(--blue);
   background: var(--blue-tint);
   color: var(--blue-ink);
+}
+
+/* ------------------------------------------------------------------ press feedback
+   One squish for every tappable thing that has no press style of its own (.btn sinks,
+   .icon-btn, .chip, .pcard, .opt and the stepper set theirs). Interruptible: a transition,
+   not a keyframe, so letting go mid-press eases straight back. */
+button.pill,
+.pop-wrap > button:not(.btn):not(.icon-btn),
+.chain-toggle,
+.toast button,
+.topnav a {
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+button.pill:active,
+.pop-wrap > button:not(.btn):not(.icon-btn):active,
+.chain-toggle:active,
+.segmented button:active,
+.toast button:active,
+.topnav a:active {
+  transform: scale(var(--press));
+}
+
+/* Popover triggers that are smaller than 44 px (cart chain chips, small info buttons) get the
+   same invisible hit area as the source pills, so the target is 44 px without growing visually. */
+.pop-wrap > button {
+  position: relative;
+}
+
+.pop-wrap > button:not(.btn)::after {
+  content: '';
+  position: absolute;
+  inset: -6px -2px;
+}
+
+.pop-wrap > button.icon-btn::after {
+  inset: auto;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
 }
 
 .pills {
@@ -765,18 +830,39 @@ button.pill::after {
   opacity: 0.5;
 }
 
+/* Brand first, in bold, so twelve "Leche semidesnatada" cards tell themselves apart at a glance. */
+.pcard .pbrand {
+  font-weight: 900;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 .pcard .name {
-  font-weight: 800;
+  margin-top: -4px;
+  font-weight: 700;
+  font-size: 0.9rem;
   line-height: 1.25;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  min-height: 2.5em;
+}
+
+.pcard .name.solo {
+  margin-top: 0;
+  font-weight: 900;
+  font-size: 0.95rem;
 }
 
 .pcard .meta {
-  font-size: 0.85rem;
+  margin-top: -4px;
+  font-size: 0.82rem;
+  font-weight: 700;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -805,10 +891,49 @@ button.pill::after {
 
 .pcard .foot {
   margin-top: auto;
+  padding-top: 4px;
   display: flex;
-  align-items: end;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
+}
+
+.pcard .price-line {
+  display: flex;
+  flex-direction: column;
+}
+
+.price.range {
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+/* Which chains sell it, by name ("Li", "Su", "+2"), cheapest first. */
+.chain-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ctag {
+  display: inline-grid;
+  place-items: center;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 7px;
+  border: var(--border) solid color-mix(in srgb, var(--c) 70%, var(--bg));
+  background: color-mix(in srgb, var(--c) 14%, var(--bg));
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.ctag.more {
+  --c: var(--muted);
+  color: var(--muted);
 }
 
 /* ------------------------------------------------------------------ skeleton */
@@ -881,6 +1006,24 @@ button.pill::after {
   display: block;
   font-weight: 900;
   margin-bottom: 2px;
+}
+
+/* Tapping the bubble for another tip: it squishes towards Cesti, who leans in to "say" it. */
+.bubble {
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.bubble:active {
+  transform: scale(var(--press)) rotate(-1deg);
+}
+
+.hello .cesti {
+  transform-origin: 50% 100%;
+  transition: transform var(--dur) var(--ease-out);
+}
+
+.hello:has(.bubble:active) .cesti {
+  transform: rotate(6deg) translateX(2px);
 }
 
 .section-title {
@@ -1194,29 +1337,56 @@ button.pill::after {
   min-height: 2.6em;
 }
 
+/* Nutri-Score strip: the product's grade rises out of it (no clipping), the others stay
+   readable on a faded fill. Grade colours come inline from Ficha. */
 .nutri {
   display: inline-flex;
-  border-radius: 10px;
-  overflow: hidden;
-  border: var(--border) solid var(--line);
+  align-items: center;
+  vertical-align: middle;
+  padding: 0 2px;
 }
 
 .nutri span {
+  position: relative;
   width: 28px;
-  height: 32px;
+  height: 30px;
   display: grid;
   place-items: center;
   font-weight: 900;
-  color: #fff;
-  opacity: 0.35;
   font-size: 0.85rem;
+  /* fade the fill, not the letter: the bg-coloured inset wash sits between fill and text */
+  box-shadow: inset 0 0 0 30px color-mix(in srgb, var(--bg) 62%, transparent);
+  color: color-mix(in srgb, var(--ink) 72%, transparent);
+}
+
+.nutri span:first-child {
+  border-radius: 9px 0 0 9px;
+}
+
+.nutri span:last-child {
+  border-radius: 0 9px 9px 0;
 }
 
 .nutri span.on {
-  opacity: 1;
-  transform: scale(1.12);
-  border-radius: 6px;
   z-index: 1;
+  border-radius: 9px;
+  color: #fff;
+  font-size: 1rem;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+  box-shadow:
+    0 0 0 2px var(--bg),
+    0 4px 10px rgba(0, 0, 0, 0.18);
+  transform: scale(1.18);
+  animation: nutri-pop 260ms var(--ease-out) 120ms backwards;
+}
+
+@keyframes nutri-pop {
+  from {
+    transform: scale(1);
+    box-shadow:
+      0 0 0 0 var(--bg),
+      0 0 0 rgba(0, 0, 0, 0);
+  }
 }
 
 .details dl {
@@ -1241,6 +1411,7 @@ button.pill::after {
 
 /* ------------------------------------------------------------------ stepper & segmented */
 .stepper {
+  position: relative;
   display: inline-flex;
   align-items: center;
   border: var(--border) solid var(--line);
@@ -1259,7 +1430,7 @@ button.pill::after {
 }
 
 .stepper button:active:not(:disabled) {
-  transform: scale(0.9);
+  transform: scale(var(--press));
 }
 
 .stepper button:disabled {
@@ -1271,6 +1442,7 @@ button.pill::after {
 .stepper input {
   min-width: 36px;
   width: 40px;
+  height: 44px;
   text-align: center;
   font-weight: 900;
   font-size: 1.05rem;
@@ -1280,6 +1452,42 @@ button.pill::after {
   padding: 0;
   -moz-appearance: textfield;
   appearance: textfield;
+}
+
+.stepper input:focus-visible {
+  outline-offset: -2px;
+}
+
+/* "Máximo 99 unidades": says why a typed quantity changed, then goes away by itself. */
+.stepper-hint {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 6px);
+  left: 50%;
+  margin-left: -80px;
+  width: 160px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 0.8rem;
+  font-weight: 850;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: var(--shadow-pop);
+}
+
+.stepper-hint::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  background: inherit;
+  border-radius: 2px;
+  transform: rotate(45deg);
 }
 
 .stepper input::-webkit-outer-spin-button,
@@ -1312,7 +1520,7 @@ button.pill::after {
   font-weight: 850;
   font-size: 0.92rem;
   color: var(--muted);
-  transition: color var(--dur) var(--ease-out);
+  transition: color var(--dur) var(--ease-out), transform var(--dur-fast) var(--ease-out);
 }
 
 .segmented button[aria-checked='true'] {
@@ -1356,6 +1564,13 @@ button.pill::after {
 
 .switch[aria-checked='true'] {
   background: var(--green-shade);
+}
+
+/* 56x34 visually, 44 px tall to the finger */
+.switch::before {
+  content: '';
+  position: absolute;
+  inset: -5px -2px;
 }
 
 .switch::after {
@@ -1888,6 +2103,9 @@ button.pill::after {
 
 .toast button {
   min-height: 44px;
+  min-width: 44px;
+  display: inline-grid;
+  place-items: center;
   padding: 0 14px;
   border-radius: 12px;
   font-weight: 900;

@@ -61,7 +61,7 @@ const byId = (tips: Tip[], id: string) => tips.find((t) => t.id === id);
 describe('savingTips', () => {
   it('gives concrete tips with numbers, biggest saving first, at most 6', () => {
     const tips = savingTips(basket, optimise(basket), NOW);
-    expect(tips.map((t) => t.id)).toEqual(['split', 'own-brand', 'single', 'missing', 'promo', 'unit-price']);
+    expect(tips.map((t) => t.id)).toEqual(['split', 'single', 'missing', 'promo', 'unit-price', 'own-brand-done']);
     expect(byId(tips, 'split')).toEqual({
       id: 'split',
       icon: expect.any(String),
@@ -69,8 +69,14 @@ describe('savingTips', () => {
       body: eur('Repartir en 3 súper te ahorra 2,20 € (16 %) frente a comprarlo todo en Mercadona. Son unos 1,10 € por cada súper de más.'),
       savingCents: 220,
     });
-    expect(byId(tips, 'own-brand')!.body).toBe(eur('Aldi tiene aceite de marca blanca por 1,50 € menos que Carbonell.'));
-    expect(byId(tips, 'own-brand')!.savingCents).toBe(150);
+    // The plan already buys Aldi's own-brand oil: no switch to chase, a well-done note instead.
+    expect(byId(tips, 'own-brand')).toBeUndefined();
+    expect(byId(tips, 'own-brand-done')).toEqual({
+      id: 'own-brand-done',
+      icon: expect.any(String),
+      title: 'Ya ahorras con la marca blanca',
+      body: eur('Tu plan ya ahorra 1,50 € gracias a la marca blanca en aceite.'),
+    });
     expect(byId(tips, 'single')!.body).toBe(eur('Elige Mercadona: todo lo que tiene precio por 13,63 €, 1,49 € menos que en Aldi.'));
     expect(byId(tips, 'missing')!.body).toContain('Bebida de avena');
     expect(byId(tips, 'promo')!.body).toBe('La oferta de Aldi en aceite acaba el 21/11 (en 6 días).');
@@ -82,10 +88,64 @@ describe('savingTips', () => {
     expect([...savings].sort((a, b) => b - a)).toEqual(savings);
   });
 
+  // Regression (shared-7): with an item priced nowhere, the headline had no
+  // single store to compare with while the split tip claimed a saving.
+  it('claims the same saving as the plan when an item has no price anywhere', () => {
+    const opt = optimise(basket);
+    expect(opt.split.missing).toEqual(['avena']);
+    expect(opt.bestSingle).toMatchObject({ chain: 'mercadona', missing: ['avena'] });
+    expect(opt.savingCents).toBe(220);
+    expect(byId(savingTips(basket, opt, NOW), 'split')!.savingCents).toBe(opt.savingCents);
+  });
+
   it('suggests one more store when the cap holds the saving back', () => {
     const tips = savingTips(basket, optimise(basket, { cap: 1 }), NOW);
     expect(tips[0]).toMatchObject({ id: 'more-stores', savingCents: 220, body: eur('Si pasas también por Aldi y Lidl, ahorras otros 2,20 €.') });
     expect(byId(tips, 'split')).toBeUndefined();
+  });
+
+  // Regression (shared-11): "también" was said even when the bigger plan drops
+  // the store the current plan uses.
+  it('words more stores as a swap when the bigger plan leaves the current store out', () => {
+    const items = [
+      it_('leche', 'Leche', 1, { sizeText: '1 L' }, [o('aldi', 'Leche', null, '1 L', 150), o('bm', 'Leche', null, '1 L', 100), o('carrefour', 'Leche', null, '1 L', 400)]),
+      it_('pan', 'Pan', 1, { sizeText: '1 L' }, [o('aldi', 'Pan', null, '1 L', 150), o('bm', 'Pan', null, '1 L', 400), o('carrefour', 'Pan', null, '1 L', 100)]),
+    ];
+    const opt = optimise(items, { cap: 1 });
+    expect(opt.split.stops.map((s) => s.chain)).toEqual(['aldi']);
+    expect(opt.byCap.all.stops.map((s) => s.chain).sort()).toEqual(['bm', 'carrefour']);
+    expect(byId(savingTips(items, opt, NOW), 'more-stores')).toMatchObject({
+      title: 'Un súper más compensa',
+      body: eur('Si cambias Aldi por BM y Carrefour, ahorras 1,00 € más.'),
+      savingCents: 100,
+    });
+  });
+
+  // Regression (shared-6): with no wanted size, a 250 ml bottle was compared
+  // one for one with a 5 L garrafa, and the single-store tip claimed 28,50 €.
+  it('claims no saving that hinges on an item without a size sold in sizes that do not compare', () => {
+    const oil = it_('aceite', 'Aceite de oliva virgen extra', 1, {}, [
+      o('aldi', 'Aceite de oliva virgen extra', null, '5 L', 3200),
+      o('lidl', 'Aceite de oliva virgen extra', null, '250 ml', 350),
+    ]);
+    const alone = savingTips([oil], optimise([oil]), NOW);
+    expect(alone.map((t) => t.body).join(' ')).not.toContain('28,50');
+    expect(byId(alone, 'single')).toBeUndefined();
+    expect(byId(alone, 'size')).toMatchObject({
+      title: '¿Qué tamaño de aceite?',
+      body: 'No sabemos qué tamaño de aceite quieres y cada súper lo vende en uno distinto (Lidl, 250 ml; Aldi, 5 L), así que su precio no se puede comparar tal cual. Fíjate en el precio por litro.',
+    });
+    expect(byId(alone, 'unit-price')!.body).toBe(eur('En Lidl, aceite cuesta 3,50 € el envase pero sale a 14,00 €/L; en Aldi, a 6,40 €/L.'));
+    // Lidl has no milk, so the single store is Aldi: the split vs Aldi hinges on the oil.
+    const milk = it_('leche', 'Leche', 1, { sizeText: '1 L' }, [o('aldi', 'Leche', null, '1 L', 100)]);
+    const opt = optimise([oil, milk]);
+    expect(opt.incomparable).toEqual(['aceite']);
+    expect(opt.bestSingle!.chain).toBe('aldi');
+    expect(byId(savingTips([oil, milk], opt, NOW), 'split')).toBeUndefined();
+    // An item whose offers come in one size, or that has a wanted size, is comparable.
+    const same = it_('aceite', 'Aceite', 1, {}, [o('aldi', 'Aceite', null, '1 L', 500), o('lidl', 'Aceite', null, '1 L', 450)]);
+    expect(optimise([same]).incomparable).toEqual([]);
+    expect(optimise([{ ...oil, wanted: { ...oil.wanted, sizeText: '1 L' } }]).incomparable).toEqual([]);
   });
 
   it('is deterministic', () => {
@@ -146,6 +206,29 @@ describe('savingTips', () => {
     expect(byId(savingTips(past, optimise(past), NOW), 'promo')).toBeUndefined();
   });
 
+  // Regression (shared-13): a yearless promo that ended last December showed as
+  // running, ending in about a year.
+  it('dates a promo without a year from the day it was seen', () => {
+    const seen = [it_('leche', 'Leche', 1, {}, [o('aldi', 'Leche', null, null, 80, { promo: 'Oferta hasta 31/12', observedOn: '2026-12-20' })])];
+    const promo = (on: string) => byId(savingTips(seen, optimise(seen), new Date(`${on}T10:00:00Z`)), 'promo');
+    expect(promo('2026-12-28')!.body).toBe('La oferta de Aldi en leche acaba el 31/12 (en 3 días).');
+    expect(promo('2027-01-02')).toBeUndefined();
+    expect(promo('2027-03-01')).toBeUndefined();
+    // Seen in March, ending in March: over by November, not next March.
+    const spring = [it_('pan', 'Pan', 1, {}, [o('lidl', 'Pan', null, null, 80, { promo: 'Hasta 15/03', observedOn: '2026-03-01' })])];
+    expect(byId(savingTips(spring, optimise(spring), NOW), 'promo')).toBeUndefined();
+    // Seen in late December, ending in early January: next year's.
+    const winter = [it_('pan', 'Pan', 1, {}, [o('lidl', 'Pan', null, null, 80, { promo: 'Hasta 05/01', observedOn: '2026-12-27' })])];
+    expect(byId(savingTips(winter, optimise(winter), new Date('2027-01-02T10:00:00Z')), 'promo')!.body).toContain('acaba el 05/01 (en 3 días)');
+  });
+
+  it('gives no promo tip for a promo read off a stale price', () => {
+    const items = [it_('leche', 'Leche', 1, {}, [o('carrefour', 'Leche', null, null, 80, { promo: 'Oferta hasta 18/11', source: 'open_prices', observedOn: '2026-09-20' })])];
+    const tips = savingTips(items, optimise(items), NOW);
+    expect(byId(tips, 'promo')).toBeUndefined();
+    expect(byId(tips, 'stale')).toBeDefined();
+  });
+
   it('warns about what a pack leaves over', () => {
     const items = [it_('leche', 'Leche semidesnatada', 2, { sizeText: '1 L' }, [o('aldi', 'Leche semidesnatada', 'Milsani', '6 x 1 L', 474)])];
     expect(byId(savingTips(items, optimise(items), NOW), 'leftover')!.body).toBe(
@@ -158,7 +241,9 @@ describe('savingTips', () => {
     expect(byId(savingTips(fits, optimise(fits), NOW), 'leftover')).toBeUndefined();
   });
 
-  it('adds up own-brand savings over several items', () => {
+  // Regression (shared-12, heuristics-3): the own-brand tip asked to switch to
+  // own brands the plan already bought, repeating a saving another tip counts.
+  it('suggests own brands the plan does not buy yet, measured against what it buys', () => {
     const items = [
       it_('aceite', 'Aceite de girasol', 1, { brand: 'Koipesol', sizeText: '1 L' }, [
         o('mercadona', 'Aceite de girasol', 'Hacendado', '1 L', 180),
@@ -166,12 +251,31 @@ describe('savingTips', () => {
       ]),
       it_('tomate', 'Tomate frito', 2, { brand: 'Orlando', sizeText: '350 g' }, [
         o('lidl', 'Tomate frito', 'Lidl', '350 g', 60),
-        o('alcampo', 'Tomate frito Orlando', 'Orlando', '350 g', 110),
+        o('carrefour', 'Tomate frito Orlando', 'Orlando', '350 g', 110),
       ]),
     ];
-    const tip = byId(savingTips(items, optimise(items), NOW), 'own-brand')!;
-    expect(tip.body).toBe(eur('Mercadona tiene aceite de marca blanca (Hacendado) por 1,20 € menos que Koipesol. Con 1 producto más, el ahorro sube a 2,20 €.'));
+    // One store: Carrefour, with both brands.
+    const capped = savingTips(items, optimise(items, { cap: 1 }), NOW);
+    const tip = byId(capped, 'own-brand')!;
+    expect(tip.body).toBe(eur('Mercadona tiene aceite de marca blanca (Hacendado) por 1,20 € menos que Koipesol. Si también eliges marca blanca en tomate, el ahorro sube a 2,20 €.'));
     expect(tip.savingCents).toBe(220);
+    expect(byId(capped, 'own-brand-done')).toBeUndefined();
+    // No limit: the plan buys both own brands already.
+    const free = savingTips(items, optimise(items), NOW);
+    expect(byId(free, 'own-brand')).toBeUndefined();
+    expect(byId(free, 'own-brand-done')!.body).toBe(eur('Tu plan ya ahorra 2,20 € gracias a la marca blanca en aceite y tomate.'));
+    expect(byId(free, 'own-brand-done')!.savingCents).toBeUndefined();
+  });
+
+  it('does not count an own-brand saving twice when the plan buys it', () => {
+    const items = [it_('leche', 'Leche entera Pascual', 2, { brand: 'Pascual', sizeText: '1 L' }, [
+      o('mercadona', 'Leche entera', 'Hacendado', '1 L', 89),
+      o('carrefour', 'Leche entera Pascual', 'Pascual', '1 L', 125),
+    ])];
+    const tips = savingTips(items, optimise(items), NOW);
+    expect(byId(tips, 'own-brand')).toBeUndefined();
+    expect(tips.filter((t) => t.savingCents === 72).map((t) => t.id)).toEqual(['single']);
+    expect(byId(tips, 'own-brand-done')!.body).toBe(eur('Tu plan ya ahorra 0,72 € gracias a la marca blanca en leche.'));
   });
 
   it('says when no chain has everything (equal coverage: the cheaper chain)', () => {

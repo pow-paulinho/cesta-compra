@@ -101,14 +101,25 @@ describe('optimise', () => {
     expect(r.split.stores).toBe(2);
   });
 
-  it('reports items that no chain prices and gives no saving then', () => {
+  // Regression (shared-7): one item priced nowhere used to null bestSingle and
+  // savingCents, while the split tip still claimed a saving against one store.
+  it('reports items that no chain prices and still compares the chains on the rest', () => {
     const items = [...cart, item('caviar', 1, {})];
     const r = optimise(items);
     expect(r.split.missing).toEqual(['caviar']);
     expect(r.split.totalCents).toBe(180 + 150 + 450);
+    expect(r.bestSingle).toMatchObject({ chain: 'mercadona', totalCents: 240 + 150 + 450, missing: ['caviar'] });
+    expect(r.savingCents).toBe(240 - 180);
+    expect(r.byCap[1].missing).toEqual(['caviar']);
+  });
+
+  it('has no single store to compare when no chain has every priced item', () => {
+    const r = optimise([item('a', 1, { aldi: 100 }), item('b', 1, { lidl: 100 }), item('c', 1, {})]);
     expect(r.bestSingle).toBeNull();
     expect(r.savingCents).toBeNull();
-    expect(r.byCap[1].missing).toEqual(['caviar']);
+    const none = optimise([item('c', 1, {})]);
+    expect(none.bestSingle).toBeNull();
+    expect(none.savingCents).toBeNull();
   });
 
   it('lets the extra-store cost flip the decision', () => {
@@ -204,10 +215,31 @@ describe('optimise', () => {
     expect(some.split.stops[0]!.lines[0]).toMatchObject({ packs: 1, costCents: 474, leftover: { count: 1, amount: 1000, unit: 'ml' } });
   });
 
+  // Regression (shared-1): 800 g bags used to count as 1 kg each, so the plan
+  // bought 4 kg for 5 kg and sent the item to the dearer-per-kilo chain.
+  it('never counts a smaller pack as a whole wanted unit', () => {
+    const r = optimise([item('arroz', 5, { aldi: [100, '800 g'], lidl: [110, '1 kg'] }, '1 kg')]);
+    expect(r.split.stops.map((s) => s.chain)).toEqual(['lidl']);
+    expect(r.split.totalCents).toBe(550);
+    expect(r.singles.find((s) => s.chain === 'aldi')).toMatchObject({ totalCents: 700 });
+    expect(r.singles.find((s) => s.chain === 'aldi')!.stops[0]!.lines[0]).toMatchObject({ packs: 7, costCents: 700 });
+  });
+
   it('falls back to qty packs when sizes are unknown', () => {
     const r = optimise([item('fruta', 3, { aldi: [200, null], lidl: [250, null] }, null)]);
     expect(r.split.totalCents).toBe(600);
     expect(r.split.stops[0]!.lines[0]!.packs).toBe(3);
+    expect(r.incomparable).toEqual([]);
+  });
+
+  it('flags items without a wanted size whose offers come in sizes that do not compare', () => {
+    const r = optimise([
+      item('aceite', 1, { aldi: [3200, '5 L'], lidl: [350, '250 ml'] }, null),
+      item('leche', 1, { aldi: [100, '1 L'], lidl: [110, '1,1 L'] }, null),
+      item('queso', 1, { aldi: [300, '250 g'], lidl: [300, '250 ml'] }, null),
+      item('agua', 1, { aldi: [50, '1,5 L'], lidl: [600, '6 x 1,5 L'] }, '1,5 L'),
+    ]);
+    expect(r.incomparable).toEqual(['aceite', 'queso']);
   });
 
   it('handles all eight chains at once', () => {

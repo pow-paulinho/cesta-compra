@@ -69,6 +69,32 @@ describe('parseSize', () => {
     expect(parseSize('cuarto de kilo')).toEqual(S(1, 250, 'g'));
   });
 
+  // Regression (shared-5): a dot after the piece word, or a piece word such as
+  // "cápsulas", used to drop the count, so a 6-pack read as one bottle.
+  it.each([
+    ['6 uds. x 1 l', S(6, 1000, 'ml')],
+    ['6 ud. x 1 l', S(6, 1000, 'ml')],
+    ['8 uds. x 125 g', S(8, 125, 'g')],
+    ['Lote 2 uds. x 500 g', S(2, 500, 'g')],
+    ['4 u. x 125 g', S(4, 125, 'g')],
+    ['24 cápsulas x 5 g', S(24, 5, 'g')],
+    ['10 bolsitas x 1,5 g', S(10, 1.5, 'g')],
+    ['10 cápsulas de 5,5 g', S(10, 5.5, 'g')],
+    ['6 latas. x 33 cl', S(6, 330, 'ml')],
+    ['Pack 2 x 1 docena', S(2, 12, 'ud')],
+    ['3 x media docena', S(3, 6, 'ud')],
+    ['1 L (6 uds)', S(6, 1000, 'ml')],
+    ['33 cl (pack 6)', S(6, 330, 'ml')],
+    ['½ kg', S(1, 500, 'g')],
+    ['1½ l', S(1, 1500, 'ml')],
+  ])('keeps the count in %j', (text, size) => {
+    expect(parseSize(text)).toEqual(size);
+  });
+
+  it('does not take a bare number in brackets for a count', () => {
+    expect(parseSize('Leche 1 L (6)')).toEqual(S(1, 1000, 'ml'));
+  });
+
   it('prefers the weight of a box of pieces when no "x" ties them', () => {
     expect(parseSize('12 ud 730 g')).toEqual(S(1, 730, 'g'));
   });

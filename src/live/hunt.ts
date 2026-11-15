@@ -16,7 +16,7 @@ import { CHAINS } from '../shared/chains';
 import { OWN_BRANDS, normText, pickBest, rankCandidates, tokens } from '../shared/equiv';
 import { CHAIN_IDS, type Candidate, type ChainId, type HuntEvent, type HuntMode, type Offer, type WantedProduct } from '../shared/types';
 import { liveAccess, lockedReason, type LiveKeyEnv } from './auth';
-import { failure, fallbackReason, json, liveAdapter, runAdapter, type LiveDeps } from './common';
+import { failure, fallbackReason, json, liveAdapter, readBodyText, runAdapter, type LiveDeps } from './common';
 import { fallbackOffers } from './fallback';
 import { ndjsonStream } from './ndjson';
 
@@ -135,7 +135,14 @@ export function choose(product: WantedProduct, offers: Offer[], mode: HuntMode, 
 const noneReason = (mode: HuntMode, name: string): string =>
   mode === 'exact' ? `No hemos encontrado este producto en ${name}.` : `No hemos encontrado nada equivalente en ${name}.`;
 
-export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, deps: LiveDeps, emit: (e: HuntEvent) => Promise<void>): Promise<void> {
+export async function runHunt(
+  input: HuntInput,
+  request: Request,
+  env: HuntEnv,
+  deps: LiveDeps,
+  emit: (e: HuntEvent) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
   const started = Date.now();
   const ms = () => Date.now() - started;
   const access = liveAccess(env, request);
@@ -183,7 +190,7 @@ export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, 
   for (const id of live) {
     const adapter = liveAdapter(id, deps.adapters)!;
     answer(id, async () => {
-      const { candidates, pick } = choose(product, await runAdapter(adapter, query, deps), mode, qty);
+      const { candidates, pick } = choose(product, await runAdapter(adapter, query, deps, signal), mode, qty);
       return pick
         ? { status: 'ok', candidates, pick }
         : { status: 'none', candidates, pick: null, reason: noneReason(mode, CHAINS[id].name) };
@@ -226,19 +233,22 @@ export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, 
 
 /** Reads the body (at most HUNT_MAX_BYTES), validates it, and streams the hunt. */
 export async function handleHunt(request: Request, env: HuntEnv, deps: LiveDeps, waitUntil?: (p: Promise<unknown>) => void): Promise<Response> {
-  const text = await request.text().catch(() => null);
-  if (text === null) return json({ error: `No hemos podido leer el cuerpo. ${HUNT_ACCEPTS}` }, 400);
-  if (new TextEncoder().encode(text).length > HUNT_MAX_BYTES) return json({ error: `El cuerpo pasa de ${HUNT_MAX_BYTES} bytes. ${HUNT_ACCEPTS}` }, 413);
+  const read = await readBodyText(request, HUNT_MAX_BYTES);
+  if (!read.ok) {
+    return read.why === 'too-large'
+      ? json({ error: `El cuerpo pasa de ${HUNT_MAX_BYTES} bytes. ${HUNT_ACCEPTS}` }, 413)
+      : json({ error: `No hemos podido leer el cuerpo. ${HUNT_ACCEPTS}` }, 400);
+  }
   let body: unknown;
   try {
-    body = JSON.parse(text);
+    body = JSON.parse(read.text);
   } catch {
     return json({ error: `El cuerpo no es JSON. ${HUNT_ACCEPTS}` }, 400);
   }
   const parsed = parseHunt(body);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   const stream = ndjsonStream(
-    (emit) => runHunt(parsed.value, request, env, deps, emit),
+    (emit, signal) => runHunt(parsed.value, request, env, deps, emit, signal),
     (err) => console.error('hunt stream failed:', err instanceof Error ? err.message : String(err)),
   );
   waitUntil?.(stream.done);

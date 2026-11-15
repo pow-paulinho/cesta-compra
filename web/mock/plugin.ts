@@ -57,6 +57,9 @@ async function stream<T>(req: IncomingMessage, res: ServerResponse, jobs: Array<
   if (!closed) res.end(JSON.stringify(done(Date.now() - t0)) + '\n');
 }
 
+/** Products whose Supercor answer already timed out once (the retry then answers). */
+const timedOut = new Set<string>();
+
 const LOCKED_REASON = 'La búsqueda en vivo necesita tu clave. Añádela en Ajustes.';
 
 function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL, keyOk: boolean) {
@@ -115,7 +118,9 @@ async function handleHunt(req: IncomingMessage, res: ServerResponse, keyOk: bool
         const base = { type: 'chain' as const, chain, ms: at };
         if (!asked.includes(chain)) return { ...base, status: 'unavailable', candidates: [], pick: null, reason: 'No está entre los supers elegidos para esta búsqueda.' };
         if (isLiveChain(chain) && !keyOk) return { ...base, status: 'locked', candidates: [], pick: null, reason: LOCKED_REASON };
-        if (chain === 'supercor' && rand(p.name) > 0.75) {
+        // Supercor times out the first time for some products, so "Reintentar" can be tried.
+        if (chain === 'supercor' && rand(p.name) > 0.75 && !timedOut.has(p.name)) {
+          timedOut.add(p.name);
           return { ...base, status: 'unavailable', candidates: [], pick: null, reason: 'Open Prices no ha respondido a tiempo. Vuelve a intentarlo en un rato.' };
         }
         const offers: Offer[] = [];

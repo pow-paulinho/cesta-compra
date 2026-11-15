@@ -12,8 +12,8 @@
  * fewer stores, then by chain ids.
  */
 import { CHAIN_IDS, type ChainId, type Offer, type WantedProduct } from './types';
-import { costFor, wantedSize } from './equiv';
-import type { Size } from './units';
+import { costFor, offerSize, wantedSize } from './equiv';
+import { totalAmount, type Size } from './units';
 
 export interface PlanItem {
   id: string;
@@ -52,13 +52,24 @@ export interface PlanResult {
 export interface Optimisation {
   /** Every chain considered, sorted: full coverage first (fewest missing), then total, then chain id. */
   singles: Array<PlanResult & { chain: ChainId }>;
-  /** The cheapest chain that has every item; null when none has, or the cart is empty. */
+  /**
+   * The cheapest chain that has every item some chain prices (an item priced
+   * nowhere cannot tell chains apart, so it does not stop the comparison; it
+   * is in `missing`); null when no chain has them all, or nothing has a price.
+   */
   bestSingle: (PlanResult & { chain: ChainId }) | null;
   /** The best plan under opts.cap and opts.extraStoreCents. */
   split: PlanResult;
   byCap: { 1: PlanResult; 2: PlanResult; 3: PlanResult; all: PlanResult };
-  /** bestSingle.totalCents - split.totalCents when both cover every item; else null. */
+  /** bestSingle.totalCents - split.totalCents when the split covers every item some chain prices; else null. */
   savingCents: number | null;
+  /**
+   * Ids of the items without a wanted size whose offers come in sizes that do
+   * not compare ("250 ml" at one chain, "5 L" at another), in cart order. They
+   * are costed one pack per unit, so a saving that moves them between chains
+   * is not like for like: say so next to it.
+   */
+  incomparable: string[];
 }
 
 export interface OptimiseOptions {
@@ -145,6 +156,21 @@ function planFor(rows: Row[], chains: readonly ChainId[]): Evaluated {
   };
 }
 
+/** Items without a wanted size whose offers' sizes differ in unit or by more than 20 %. */
+function incomparableItems(rows: Row[]): string[] {
+  const out: string[] = [];
+  for (const { item, cells } of rows) {
+    if (wantedSize(item.wanted)) continue;
+    const sizes = Object.values(cells)
+      .map((c) => (c ? offerSize(c.offer) : null))
+      .filter((x): x is Size => x !== null);
+    if (sizes.length < 2) continue;
+    const totals = sizes.map(totalAmount);
+    if (sizes.some((x) => x.unit !== sizes[0]!.unit) || Math.max(...totals) > Math.min(...totals) * 1.2) out.push(item.id);
+  }
+  return out;
+}
+
 function objective(p: PlanResult, extra: number): number {
   return p.totalCents + Math.max(0, p.stores - 1) * extra;
 }
@@ -197,7 +223,9 @@ export function optimise(items: PlanItem[], opts: OptimiseOptions = {}): Optimis
   const singles = considered
     .map((chain) => ({ chain, ...planFor(rows, [chain]).plan }))
     .sort((a, b) => a.missing.length - b.missing.length || a.totalCents - b.totalCents || cmpId(a.chain, b.chain));
-  const bestSingle = rows.length ? singles.find((s) => s.missing.length === 0) ?? null : null;
+  // Items no considered chain prices are missing from every plan alike.
+  const nowhere = rows.filter((r) => !present.some((c) => r.cells[c])).length;
+  const bestSingle = singles.find((s) => s.stores > 0 && s.missing.length === nowhere) ?? null;
 
   const split = bestUnder(opts.cap);
   return {
@@ -205,6 +233,7 @@ export function optimise(items: PlanItem[], opts: OptimiseOptions = {}): Optimis
     bestSingle,
     split,
     byCap: { 1: bestUnder(1), 2: bestUnder(2), 3: bestUnder(3), all: bestUnder(undefined) },
-    savingCents: bestSingle && split.missing.length === 0 ? bestSingle.totalCents - split.totalCents : null,
+    savingCents: bestSingle && split.missing.length === nowhere ? bestSingle.totalCents - split.totalCents : null,
+    incomparable: incomparableItems(rows),
   };
 }

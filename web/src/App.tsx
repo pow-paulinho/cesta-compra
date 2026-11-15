@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { AnimatePresence, motion, MotionConfig } from 'motion/react';
 import { formatEuros } from '@shared/units';
 import { Dock, Ticker } from './components/feedback';
@@ -8,6 +8,7 @@ import { Sheet } from './components/Sheet';
 import { resumePending } from './lib/hunt';
 import { DUR, EASE_OUT } from './lib/motion';
 import { closeOverlay, hrefFor, openOverlay, useRoute, type Path } from './lib/router';
+import { useSearchActivity } from './lib/search';
 import { useStore } from './lib/store';
 import { CartScreen } from './screens/Cart';
 import { Ficha } from './screens/Ficha';
@@ -25,6 +26,11 @@ export function App() {
   const route = useRoute();
   const productKey = route.params.get('p');
   const settingsOpen = route.params.has('ajustes');
+  // The screen the app opened on appears without a fade; later tab changes fade in.
+  const firstPath = useRef<Path | null>(route.path);
+  useEffect(() => {
+    if (firstPath.current !== route.path) firstPath.current = null;
+  }, [route.path]);
 
   useEffect(() => {
     resumePending();
@@ -38,7 +44,7 @@ export function App() {
   return (
     <MotionConfig reducedMotion="user">
       <div className="app">
-        <a href="#contenido" className="sr-only" onClick={(e) => {
+        <a href="#contenido" className="sr-only skip-link" onClick={(e) => {
           e.preventDefault();
           document.getElementById('contenido')?.focus();
         }}>
@@ -46,17 +52,16 @@ export function App() {
         </a>
         <Header path={route.path} />
         <main className="main" id="contenido" tabIndex={-1}>
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={route.path}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, transition: { duration: DUR.fast } }}
-              transition={{ duration: DUR.base, ease: EASE_OUT }}
-            >
-              {route.path === '/cesta' ? <CartScreen /> : route.path === '/plan' ? <PlanScreen /> : <SearchScreen />}
-            </motion.div>
-          </AnimatePresence>
+          {/* Tabs swap at once (no exit to wait for) and the new screen fades in: the tab
+              indicator already slides, so this stays short and never leaves a blank gap. */}
+          <motion.div
+            key={route.path}
+            initial={firstPath.current === route.path ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: DUR.fast, ease: EASE_OUT }}
+          >
+            {route.path === '/cesta' ? <CartScreen /> : route.path === '/plan' ? <PlanScreen /> : <SearchScreen />}
+          </motion.div>
         </main>
         <TabBar path={route.path} />
         <Dock />
@@ -79,6 +84,15 @@ export function App() {
 
 function useCartCount() {
   return useStore((s) => s.cart.length);
+}
+
+/**
+ * Where a tab leads. Coming back to Buscar from another tab returns to the last results;
+ * tapping Buscar while on it goes to the start (suggestions, recent searches).
+ */
+function useTabHref() {
+  const { q } = useSearchActivity();
+  return (to: Path, from: Path) => (to === '/buscar' && from !== '/buscar' ? hrefFor('/buscar', { q }) : hrefFor(to));
 }
 
 function CartBadge({ count }: { count: number }) {
@@ -105,6 +119,7 @@ function CartBadge({ count }: { count: number }) {
 
 function Header({ path }: { path: Path }) {
   const count = useCartCount();
+  const tabHref = useTabHref();
   const savings = useStore((s) => s.savings);
   const saved = savings.reduce((a, b) => a + b.cents, 0);
   return (
@@ -116,7 +131,7 @@ function Header({ path }: { path: Path }) {
         </a>
         <nav className="topnav" aria-label="Secciones">
           {TABS.map((t) => (
-            <a key={t.path} href={hrefFor(t.path)} aria-current={path === t.path ? 'page' : undefined} style={{ isolation: 'isolate' }}>
+            <a key={t.path} href={tabHref(t.path, path)} aria-current={path === t.path ? 'page' : undefined} style={{ isolation: 'isolate' }}>
               {path === t.path && <motion.span layoutId="topnav-ind" className="nav-indicator" transition={{ duration: DUR.slow, ease: EASE_OUT }} />}
               <Icon name={t.icon} size={20} />
               {t.label}
@@ -146,10 +161,11 @@ function Header({ path }: { path: Path }) {
 
 function TabBar({ path }: { path: Path }) {
   const count = useCartCount();
+  const tabHref = useTabHref();
   return (
     <nav className="tabbar" aria-label="Secciones">
       {TABS.map((t) => (
-        <a key={t.path} href={hrefFor(t.path)} aria-current={path === t.path ? 'page' : undefined} aria-label={t.path === '/cesta' && count ? `${t.label}, ${count} productos` : t.label}>
+        <a key={t.path} href={tabHref(t.path, path)} aria-current={path === t.path ? 'page' : undefined} aria-label={t.path === '/cesta' && count ? `${t.label}, ${count} productos` : t.label}>
           <span className="tab-icon">
             {path === t.path && <motion.span layoutId="tab-ind" className="tab-indicator" transition={{ duration: DUR.slow, ease: EASE_OUT }} />}
             <Icon name={t.icon} size={24} />

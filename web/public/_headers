@@ -1,0 +1,20 @@
+# Response headers for the web app. Vite copies this file into dist/client, and Workers static
+# assets apply it to every file and to the index.html fallback (it is never served itself).
+# The Worker's own routes (/api/*, /health) do not pass through here.
+#
+# CSP, directive by directive:
+#   script-src 'self'        only our bundle; no inline scripts, no eval (the build has none)
+#   style-src 'unsafe-inline' React and motion write style attributes for every animation
+#   img-src https: data:     product photos are hotlinked from the chains' and Open Food Facts'
+#                            CDNs, whose hosts change; data: for the placeholder SVGs
+#   font-src 'self'          Nunito is self-hosted (@fontsource, in /assets)
+#   connect-src 'self'       the app only talks to its own /api
+#   frame-ancestors 'none'   no one can frame the app (clickjacking on Ajustes > clave)
+# Referrer-Policy no-referrer: hotlinked images do not tell those CDNs where the app lives.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()

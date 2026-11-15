@@ -24,6 +24,17 @@ export interface ChainAdapter {
   search(query: string, ctx: AdapterCtx): Promise<Offer[]>;
 }
 
+/**
+ * A failure whose reason, written by us in Spanish, may be shown to the user as it is
+ * (the message stays technical, for the logs).
+ */
+export class SourceError extends Error {
+  constructor(message: string, public readonly userReason: string) {
+    super(message);
+    this.name = 'SourceError';
+  }
+}
+
 /** Thrown when the site refuses us (403/429/challenge page): reported as "blocked", never retried. */
 export class BlockedError extends Error {
   constructor(public readonly status: number, message = `blocked (${status})`) {

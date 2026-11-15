@@ -14,10 +14,46 @@ export const useSheetDrag = () => useContext(DragStart);
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Makes everything outside the sheet inert (header, page, tab bar, dock), so neither Tab nor a
+ * screen reader can reach the page behind an aria-modal dialog. Walks up from the sheet and marks
+ * the siblings at each level, wherever the sheet is mounted; returns the undo.
+ */
+const inertHolds = new Map<HTMLElement, number>();
+
+function inertOutside(sheet: HTMLElement, keep: HTMLElement | null): () => void {
+  const marked: HTMLElement[] = [];
+  for (let node: HTMLElement | null = sheet; node && node !== document.body; node = node.parentElement) {
+    const parent: HTMLElement | null = node.parentElement;
+    if (!parent) break;
+    for (const sib of parent.children) {
+      if (sib === node || sib === keep || !(sib instanceof HTMLElement) || sib.contains(sheet)) continue;
+      if (sib.tagName === 'SCRIPT' || sib.tagName === 'STYLE') continue;
+      const holds = inertHolds.get(sib) ?? 0;
+      if (!holds && sib.inert) continue; // made inert by someone else: not ours to undo
+      inertHolds.set(sib, holds + 1);
+      sib.inert = true;
+      marked.push(sib);
+    }
+  }
+  // Counted, so a sheet that is still leaving does not wake the page under the sheet replacing it.
+  return () => {
+    for (const el of marked) {
+      const holds = (inertHolds.get(el) ?? 1) - 1;
+      if (holds > 0) inertHolds.set(el, holds);
+      else {
+        inertHolds.delete(el);
+        el.inert = false;
+      }
+    }
+  };
+}
+
 export function Sheet({ onClose, label, children }: { onClose: () => void; label: string; children: ReactNode }) {
   const desktop = useIsDesktop();
   const controls = useDragControls();
   const ref = useRef<HTMLDivElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   useScrollLock(true);
@@ -25,8 +61,11 @@ export function Sheet({ onClose, label, children }: { onClose: () => void; label
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     const t = setTimeout(() => ref.current?.focus(), 30);
+    const freed = ref.current ? inertOutside(ref.current, backdropRef.current) : () => {};
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // A popover inside the sheet claims Escape first (and prevents it): only the top layer closes.
+        if (e.defaultPrevented) return;
         e.stopPropagation();
         closeRef.current();
       }
@@ -35,10 +74,15 @@ export function Sheet({ onClose, label, children }: { onClose: () => void; label
       if (!els.length) return;
       const first = els[0]!;
       const last = els[els.length - 1]!;
-      if (e.shiftKey && (document.activeElement === first || document.activeElement === ref.current)) {
+      const at = document.activeElement;
+      // Focus can fall to <body> when the focused control unmounts or gets disabled: bring it back in.
+      if (!at || !ref.current.contains(at)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && (at === first || at === ref.current)) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && at === last) {
         e.preventDefault();
         first.focus();
       }
@@ -47,6 +91,7 @@ export function Sheet({ onClose, label, children }: { onClose: () => void; label
     return () => {
       clearTimeout(t);
       document.removeEventListener('keydown', onKey);
+      freed();
       prev?.focus?.({ preventScroll: true });
     };
   }, []);
@@ -59,6 +104,7 @@ export function Sheet({ onClose, label, children }: { onClose: () => void; label
   return (
     <>
       <motion.div
+        ref={backdropRef}
         className="backdrop"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}

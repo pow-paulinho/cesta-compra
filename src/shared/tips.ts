@@ -10,7 +10,7 @@ import { CHAINS } from './chains';
 import type { ChainId, Offer } from './types';
 import { costFor, isOwnBrand, offerSize, offerUnitPrice, ownBrandOf, STOP_WORDS, wantedSize } from './equiv';
 import type { Optimisation, PlanItem, PlanResult, StopLine } from './optimize';
-import { formatEuros, formatSize, formatUnitPrice, NBSP, totalAmount } from './units';
+import { formatEuros, formatSize, formatUnitPrice, NBSP, priceUnitOf, totalAmount } from './units';
 
 export interface Tip {
   id: string;
@@ -70,18 +70,36 @@ function ageDays(isoDate: string, now: Date): number | null {
   return Math.floor((today - t) / DAY_MS);
 }
 
-/** End date of a promo text ("Oferta hasta 21/11", "hasta el 3/12/2026"), as days from `now` and "dd/mm". */
-function promoEnd(promo: string, now: Date): { days: number; label: string } | null {
+/** An ISO date (YYYY-MM-DD) as a UTC day, or null when unreadable. */
+function isoDay(isoDate: string | null | undefined): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate ?? '');
+  return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+
+/**
+ * End date of a promo text ("Oferta hasta 21/11", "hasta el 3/12/2026"), as
+ * days from `now` and "dd/mm"; null when it has ended. A date without a year
+ * belongs to the day the promo was seen (`observedOn`, else `now`): the first
+ * such date from then on, unless it was at most half a year before (a promo
+ * text kept after it ended). "Hasta 31/12" seen in December has ended by
+ * January; "hasta 05/01" seen in December is next year's.
+ */
+function promoEnd(promo: string, now: Date, observedOn?: string | null): { days: number; label: string } | null {
   const m = /(?:hasta|acaba|termina|fin)\D{0,12}?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/i.exec(promo);
   if (!m) return null;
   const day = Number(m[1]);
   const month = Number(m[2]);
   if (day < 1 || day > 31 || month < 1 || month > 12) return null;
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  let year = m[3] ? Number(m[3].length === 2 ? `20${m[3]}` : m[3]) : now.getUTCFullYear();
-  let end = Date.UTC(year, month - 1, day);
-  // Without a year, a date long gone means next year ("hasta 05/01" seen in December).
-  if (!m[3] && end < today - 180 * DAY_MS) end = Date.UTC(++year, month - 1, day);
+  let end: number;
+  if (m[3]) {
+    end = Date.UTC(Number(m[3].length === 2 ? `20${m[3]}` : m[3]), month - 1, day);
+  } else {
+    const seen = isoDay(observedOn) ?? today;
+    const year = new Date(seen).getUTCFullYear();
+    end = Date.UTC(year, month - 1, day);
+    if (end < seen - 180 * DAY_MS) end = Date.UTC(year + 1, month - 1, day);
+  }
   const days = Math.round((end - today) / DAY_MS);
   if (days < 0) return null;
   return { days, label: `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}` };
@@ -102,11 +120,35 @@ function fullSingles(opt: Optimisation): Optimisation['singles'] {
   return opt.singles.filter((s) => s.stores > 0 && s.missing.length === nowhere);
 }
 
+/** Do two sizes compare (same base unit, within 20 %)? Unknown ones do not. */
+function sameSize(a: Offer, b: Offer): boolean {
+  const x = offerSize(a);
+  const y = offerSize(b);
+  if (!x || !y || x.unit !== y.unit) return false;
+  const [lo, hi] = [totalAmount(x), totalAmount(y)].sort((m, n) => m - n) as [number, number];
+  return hi <= lo * 1.2;
+}
+
+/**
+ * Does the difference between two plans hinge on an item without a wanted size
+ * bought in sizes that do not compare (opt.incomparable)? Then their totals
+ * are not like for like, and no saving between them is claimed.
+ */
+function hinges(opt: Optimisation, a: PlanResult | null | undefined, b: PlanResult | null | undefined): boolean {
+  const ids = new Set(opt.incomparable ?? []);
+  if (!ids.size || !a || !b) return false;
+  const inB = new Map(planLines(b).map((l) => [l.itemId, l]));
+  return planLines(a).some((l) => {
+    const other = inB.get(l.itemId);
+    return ids.has(l.itemId) && !!other && (other.chain !== l.chain || other.offer.id !== l.offer.id) && !sameSize(l.offer, other.offer);
+  });
+}
+
 function splitTip(opt: Optimisation): Tip | null {
   const { split } = opt;
   if (split.stores < 2 || split.missing.length !== opt.byCap.all.missing.length) return null;
   const bestSingle = opt.bestSingle ?? fullSingles(opt)[0] ?? null;
-  if (!bestSingle) return null;
+  if (!bestSingle || hinges(opt, bestSingle, split)) return null;
   const savingCents = bestSingle.totalCents - split.totalCents;
   if (savingCents <= 0) return null;
   const perExtra = Math.round(savingCents / (split.stores - 1));
@@ -128,7 +170,7 @@ function singleTip(opt: Optimisation): Tip | null {
   if (full.length >= 2) {
     const [best, second] = full as [typeof full[number], typeof full[number]];
     const diff = second.totalCents - best.totalCents;
-    if (diff <= 0) return null;
+    if (diff <= 0 || hinges(opt, best, second)) return null;
     return {
       id: 'single',
       icon: '🏆',
@@ -155,61 +197,91 @@ function moreStoresTip(opt: Optimisation): Tip | null {
   const { split } = opt;
   const all = opt.byCap.all;
   const delta = split.totalCents - all.totalCents;
-  if (all.stores <= split.stores || all.missing.length > split.missing.length || delta < 50) return null;
+  if (all.stores <= split.stores || all.missing.length > split.missing.length || delta < 50 || hinges(opt, split, all)) return null;
   const now = new Set(split.stops.map((s) => s.chain));
+  const then = new Set(all.stops.map((s) => s.chain));
   const added = all.stops.map((s) => s.chain).filter((c) => !now.has(c));
+  // The bigger plan may leave out a store of the current one: then it is a swap, not "also".
+  const dropped = split.stops.map((s) => s.chain).filter((c) => !then.has(c));
   if (!added.length) return null;
+  const body = dropped.length
+    ? `Si cambias ${joinNames(dropped.map(chainName))} por ${joinNames(added.map(chainName))}, ahorras ${formatEuros(delta)} más.`
+    : `Si pasas también por ${joinNames(added.map(chainName))}, ahorras otros ${formatEuros(delta)}.`;
   return {
     id: 'more-stores',
     icon: '🗺️',
-    title: plural(added.length, 'Un súper más compensa', 'Ir a más súper compensa'),
-    body: `Si pasas también por ${joinNames(added.map(chainName))}, ahorras otros ${formatEuros(delta)}.`,
+    title: plural(all.stores - split.stores, 'Un súper más compensa', 'Ir a más súper compensa'),
+    body,
     savingCents: delta,
   };
 }
 
-function ownBrandTip(items: PlanItem[]): Tip | null {
+/** Nouns for a short list: "aceite", "aceite y leche", "aceite, leche y pan", "4 productos". */
+function nounList(items: PlanItem[]): string {
+  return items.length <= 3 ? joinNames(items.map(shortNoun)) : `${items.length} productos`;
+}
+
+/**
+ * Own brands, measured against what the plan buys (the split):
+ * - 'own-brand' (a saving to chase): an own-brand offer costs less than the
+ *   branded one the plan buys for an item;
+ * - 'own-brand-done' (no saving to chase, it is in the plan already): the plan
+ *   buys an own brand, and that costs less than the cheapest branded offer.
+ * A saving the plan already makes is never offered again as a switch.
+ */
+function ownBrandTips(items: PlanItem[], opt: Optimisation): Tip[] {
+  const lines = new Map(planLines(opt.split).map((l) => [l.itemId, l]));
   const wins: Array<{ item: PlanItem; saving: number; own: Offer; ownLabel: string; brand: string }> = [];
+  const done: Array<{ item: PlanItem; saving: number }> = [];
   for (const item of items) {
-    if (!(item.qty > 0) || isOwnBrand(item.wanted.brand)) continue;
+    const line = lines.get(item.id);
+    if (!line || !(item.qty > 0) || isOwnBrand(item.wanted.brand)) continue;
     const size = wantedSize(item.wanted);
-    let bestOwn: { offer: Offer; cents: number; label: string } | null = null;
-    let bestBrand: { offer: Offer; cents: number } | null = null;
-    for (const offer of Object.values(item.offers)) {
-      if (!offer || !(offer.priceCents > 0)) continue;
-      const cents = costFor(offer, size, item.qty).cents;
-      const own = ownBrandOf(offer);
-      if (own) {
-        if (!bestOwn || cents < bestOwn.cents) bestOwn = { offer, cents, label: own.label };
-      } else if (offer.brand) {
-        if (!bestBrand || cents < bestBrand.cents) bestBrand = { offer, cents };
-      }
+    const priced = Object.values(item.offers)
+      .filter((o): o is Offer => !!o && o.priceCents > 0)
+      .map((offer) => ({ offer, cents: costFor(offer, size, item.qty).cents, own: ownBrandOf(offer) }))
+      .sort((a, b) => a.cents - b.cents || (a.offer.chain < b.offer.chain ? -1 : 1));
+    if (ownBrandOf(line.offer)) {
+      const branded = priced.find((p) => !p.own && p.offer.brand);
+      if (branded && branded.cents > line.costCents) done.push({ item, saving: branded.cents - line.costCents });
+      continue;
     }
-    if (bestOwn && bestBrand && bestOwn.cents < bestBrand.cents) {
-      wins.push({
-        item,
-        saving: bestBrand.cents - bestOwn.cents,
-        own: bestOwn.offer,
-        ownLabel: bestOwn.label,
-        brand: bestBrand.offer.brand ?? item.wanted.brand ?? 'la marca',
-      });
+    // Only a branded line has a brand to switch from (fruit, bread from the counter...).
+    if (!line.offer.brand) continue;
+    const own = priced.find((p) => p.own);
+    if (own?.own && own.cents < line.costCents) {
+      wins.push({ item, saving: line.costCents - own.cents, own: own.offer, ownLabel: own.own.label, brand: line.offer.brand });
     }
   }
-  if (!wins.length) return null;
-  wins.sort((a, b) => b.saving - a.saving || (a.item.id < b.item.id ? -1 : 1));
-  const top = wins[0]!;
-  const total = wins.reduce((s, w) => s + w.saving, 0);
-  const label = top.ownLabel.toLowerCase() === chainName(top.own.chain).toLowerCase() ? '' : ` (${top.ownLabel})`;
-  const more = wins.length > 1
-    ? ` Con ${wins.length - 1} ${plural(wins.length - 1, 'producto', 'productos')} más, el ahorro sube a ${formatEuros(total)}.`
-    : '';
-  return {
-    id: 'own-brand',
-    icon: '🏷️',
-    title: 'Cambia a marca blanca',
-    body: `${chainName(top.own.chain)} tiene ${shortNoun(top.item)} de marca blanca${label} por ${formatEuros(top.saving)} menos que ${top.brand}.${more}`,
-    savingCents: total,
-  };
+  const byBiggest = <T extends { item: PlanItem; saving: number }>(a: T, b: T) => b.saving - a.saving || (a.item.id < b.item.id ? -1 : 1);
+  const tips: Tip[] = [];
+  if (wins.length) {
+    wins.sort(byBiggest);
+    const [top, ...rest] = wins as [typeof wins[number], ...typeof wins];
+    const total = wins.reduce((sum, w) => sum + w.saving, 0);
+    const label = top.ownLabel.toLowerCase() === chainName(top.own.chain).toLowerCase() ? '' : ` (${top.ownLabel})`;
+    const more = rest.length
+      ? ` Si también eliges marca blanca en ${rest.length <= 3 ? nounList(rest.map((w) => w.item)) : `otros ${rest.length} productos`}, el ahorro sube a ${formatEuros(total)}.`
+      : '';
+    tips.push({
+      id: 'own-brand',
+      icon: '🏷️',
+      title: 'Cambia a marca blanca',
+      body: `${chainName(top.own.chain)} tiene ${shortNoun(top.item)} de marca blanca${label} por ${formatEuros(top.saving)} menos que ${top.brand}.${more}`,
+      savingCents: total,
+    });
+  }
+  if (done.length) {
+    done.sort(byBiggest);
+    const total = done.reduce((sum, d) => sum + d.saving, 0);
+    tips.push({
+      id: 'own-brand-done',
+      icon: '💪',
+      title: 'Ya ahorras con la marca blanca',
+      body: `Tu plan ya ahorra ${formatEuros(total)} gracias a la marca blanca en ${nounList(done.map((d) => d.item))}.`,
+    });
+  }
+  return tips;
 }
 
 function missingTip(items: PlanItem[], opt: Optimisation): Tip | null {
@@ -222,6 +294,30 @@ function missingTip(items: PlanItem[], opt: Optimisation): Tip | null {
     icon: '🔍',
     title: plural(ids.length, 'Un producto sin precio', `${ids.length} productos sin precio`),
     body: `${plural(ids.length, 'No hemos encontrado precio', 'No hemos encontrado precios')} en ningún súper para: ${shown}. Prueba con «Me vale otra marca».`,
+  };
+}
+
+/** An item without a wanted size that every chain sells in another size: ask for the size, point to the unit price. */
+function sizeTip(items: PlanItem[], opt: Optimisation): Tip | null {
+  const ids = new Set(opt.incomparable ?? []);
+  const item = items.find((i) => ids.has(i.id));
+  if (!item) return null;
+  const sized = Object.values(item.offers)
+    .filter((o): o is Offer => !!o && o.priceCents > 0)
+    .map((o) => ({ o, size: offerSize(o) }))
+    .filter((x): x is { o: Offer; size: NonNullable<ReturnType<typeof offerSize>> } => x.size !== null)
+    .sort((a, b) => totalAmount(a.size) - totalAmount(b.size) || (a.o.chain < b.o.chain ? -1 : 1));
+  if (sized.length < 2) return null;
+  const shown = [sized[0]!, sized[sized.length - 1]!];
+  const list = shown.map((x) => `${chainName(x.o.chain)}, ${formatSize(x.size)}`).join('; ');
+  const unit = priceUnitOf(sized[0]!.size.unit);
+  const per = unit === 'kg' ? 'kilo' : unit === 'l' ? 'litro' : 'unidad';
+  const noun = shortNoun(item);
+  return {
+    id: 'size',
+    icon: '📏',
+    title: `¿Qué tamaño de ${noun}?`,
+    body: `No sabemos qué tamaño de ${noun} quieres y cada súper lo vende en uno distinto (${list}), así que su precio no se puede comparar tal cual. Fíjate en el precio por ${per}.`,
   };
 }
 
@@ -248,11 +344,7 @@ function demoTip(opt: Optimisation): Tip | null {
 }
 
 function staleTip(opt: Optimisation, now: Date): Tip | null {
-  const old = shownOffers(opt).filter((l) => {
-    if (l.offer.source !== 'open_prices') return false;
-    const age = ageDays(l.offer.observedOn, now);
-    return age !== null && age > STALE_DAYS;
-  });
+  const old = shownOffers(opt).filter((l) => isStale(l.offer, now));
   if (!old.length) return null;
   const n = old.length;
   return {
@@ -263,10 +355,18 @@ function staleTip(opt: Optimisation, now: Date): Tip | null {
   };
 }
 
+/** An Open Prices price seen more than STALE_DAYS ago. */
+function isStale(offer: Offer, now: Date): boolean {
+  if (offer.source !== 'open_prices') return false;
+  const age = ageDays(offer.observedOn, now);
+  return age !== null && age > STALE_DAYS;
+}
+
 function promoTip(items: PlanItem[], opt: Optimisation, now: Date): Tip | null {
   const dated = shownOffers(opt)
-    .filter((l) => l.offer.promo)
-    .map((l) => ({ line: l, end: promoEnd(l.offer.promo!, now) }))
+    // A promo read off an old price may well be over; the stale tip covers those.
+    .filter((l) => l.offer.promo && !isStale(l.offer, now))
+    .map((l) => ({ line: l, end: promoEnd(l.offer.promo!, now, l.offer.observedOn) }))
     .filter((x): x is { line: StopLine & { chain: ChainId }; end: { days: number; label: string } } => x.end !== null)
     .sort((a, b) => a.end.days - b.end.days || (a.line.itemId < b.line.itemId ? -1 : 1));
   const first = dated[0];
@@ -366,17 +466,22 @@ const FILLERS: Tip[] = [
 export function savingTips(items: PlanItem[], opt: Optimisation, now: Date = new Date()): Tip[] {
   const active = items.filter((i) => Number.isFinite(i.qty) && i.qty > 0);
   if (!active.length) return [];
+  const own = ownBrandTips(active, opt);
+  const ownBrand = own.find((t) => t.id === 'own-brand') ?? null;
+  const ownBrandDone = own.find((t) => t.id === 'own-brand-done') ?? null;
   const candidates = [
     splitTip(opt),
-    ownBrandTip(active),
+    ownBrand,
     moreStoresTip(opt),
     missingTip(active, opt),
+    sizeTip(active, opt),
     singleTip(opt),
     demoTip(opt),
     staleTip(opt, now),
     promoTip(active, opt, now),
     leftoverTip(active, opt),
     unitPriceTip(active),
+    ownBrandDone,
   ].filter((t): t is Tip => t !== null);
 
   const tips = candidates

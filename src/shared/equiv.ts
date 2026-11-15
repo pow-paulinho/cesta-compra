@@ -13,6 +13,10 @@
  * A size is compatible when it is the same base unit and either within +-20 %
  * of the wanted amount, a whole multiple or fraction of it, or the same piece
  * in a different pack ("4 x 125 g" for "6 x 125 g").
+ *
+ * Names are compared word by word, without brands. A variant on one side only
+ * cuts the name score: "sin lactosa", "con gas", "virgen extra", "0,0",
+ * "azucarado", "en polvo", a flavour, or a different percentage ("70 %").
  */
 import type { Candidate, ChainId, HuntMode, MatchKind, Offer, PriceUnit, WantedProduct } from './types';
 import { parseSize, sizeFromName, totalAmount, unitPriceCents, type Size } from './units';
@@ -34,12 +38,36 @@ export const STOP_WORDS: ReadonlySet<string> = new Set([
   'ml', 'cl', 'dl', 'docena', 'docenas', 'media', 'medio',
 ]);
 
-/** Tokens that make a different product when only one side has them. */
+/** "Virgen extra" is read as one word, so it differs from plain "virgen". */
+const VIRGEN_EXTRA = 'virgen_extra';
+
+/** Words that make a different product when only one side has them. */
 const VARIANT_WORDS: ReadonlySet<string> = new Set([
   'lactosa', 'gluten', 'azucar', 'edulcorante', 'light', 'zero', 'desnatada', 'desnatado', 'semidesnatada',
   'semidesnatado', 'entera', 'entero', 'descafeinado', 'descafeinada', 'integral', 'bio', 'ecologico', 'ecologica',
-  'alcohol', 'sal', 'picante', 'proteina', 'vegetal', 'congelado', 'congelada', 'virgen',
+  'alcohol', 'sal', 'picante', 'proteina', 'vegetal', 'congelado', 'congelada', 'virgen', VIRGEN_EXTRA,
+  'gas', 'azucarado', 'azucarada', 'edulcorado', 'edulcorada', 'polvo', 'condensada', 'condensado', 'evaporada',
+  'evaporado',
+  // Flavours.
+  'fresa', 'chocolate', 'vainilla', 'limon', 'naranja', 'platano', 'coco', 'caramelo', 'menta', 'melocoton',
+  'frambuesa', 'avellana',
 ].map(stem));
+
+/** What a "sin X" may leave out and still be another product: "aceitunas sin hueso". */
+const SIN_VARIANTS: ReadonlySet<string> = new Set([
+  'hueso', 'piel', 'espina', 'cafeina', 'grasa', 'corteza', 'semilla', 'pepita', 'cascara', 'espina', 'teina',
+].map(stem));
+
+/**
+ * "sin X" is read as one word ("sin_lactosa"), a variant when X is: so "agua
+ * sin gas" and "agua con gas" ("gas") differ, and "sin conservantes" is only
+ * a word. "Sin gas" alone is what plain water is, so only "gas" marks it.
+ */
+function isVariant(w: string): boolean {
+  if (!w.startsWith('sin_')) return VARIANT_WORDS.has(w);
+  const x = w.slice(4);
+  return x !== 'gas' && (VARIANT_WORDS.has(x) || SIN_VARIANTS.has(x));
+}
 
 /**
  * Own (white-label) brands per chain, as they appear on labels. A brand field
@@ -100,11 +128,6 @@ function stem(w: string): string {
 
 function hasPhrase(haystack: string, phrase: string): boolean {
   return !!phrase && ` ${haystack} `.includes(` ${phrase} `);
-}
-
-function removePhrase(haystack: string, phrase: string): string {
-  if (!phrase) return haystack;
-  return ` ${haystack} `.split(` ${phrase} `).join(' ').replace(/\s+/g, ' ').trim();
 }
 
 /** Brand phrases of a brand field; Open Food Facts lists several separated by commas. */
@@ -198,36 +221,155 @@ function brandRelation(wanted: WantedProduct, offer: Offer): BrandRelation {
   return 'unknown';
 }
 
-/** Name words with every brand phrase (both sides' and every own brand) removed, stemmed. */
-function nameStems(name: string, brands: string[]): string[] {
-  let n = normText(name);
-  for (const b of brands) n = removePhrase(n, b);
-  for (const p of OWN_BRAND_PHRASES) n = removePhrase(n, p.phrase);
-  const t = tokens(n).map(stem);
-  // A name that was only a brand ("Coca-Cola") keeps its words.
-  return t.length ? t : tokens(name).map(stem);
+// ---------------------------------------------------------------------------
+// Words for matching (tokens() stays as it is: the catalogue search uses it)
+// ---------------------------------------------------------------------------
+
+/** "0,0" (beer) and "0 % alcohol" mean "sin alcohol". */
+const ALCOHOL_FREE = /(?<![\d.,])0[.,]0(?!\d)\s*%?|(?<![\d.,])0\s*%\s*(?:de\s+)?(?:vol\.?\s*)?alcohol/gi;
+/** "0 % M.G.", "0 % materia grasa": the same as a bare "0 %". */
+const FAT_FREE = /(?<![\d.,])0\s*%\s*(?:de\s+)?(?:m\.?\s*g\.?|materia\s+grasa|grasas?)(?![a-z])/gi;
+/** "0 % lactosa", "0 % azúcares": "sin lactosa", "sin azúcares". */
+const ZERO_OF = /(?<![\d.,])0\s*%\s*(?:de\s+)?(?=(?:lactosa|az[u\u00fa]car|gluten|sal(?![a-z])|edulcorante))/gi;
+/** "70 %", "3,6%", "0 %": a share that names a variant (cocoa, fat). */
+const PERCENT = /(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*%/g;
+
+/**
+ * Normalised text for matching: "0,0" reads "sin alcohol", "0 % lactosa"
+ * reads "sin lactosa", and percentages are taken out into `pcts` ("70pct"),
+ * because normText would turn them into bare numbers that tokens() drops.
+ */
+function matchText(raw: string | null | undefined, pcts: string[] = []): string {
+  const pct = (n: string) => {
+    const key = `${n.replace(/[.,]/, 'p').replace(/p0+$/, '')}pct`;
+    if (!pcts.includes(key)) pcts.push(key);
+    return ' ';
+  };
+  const t = (raw ?? '')
+    .replace(ALCOHOL_FREE, ' sin alcohol ')
+    .replace(FAT_FREE, () => pct('0'))
+    .replace(ZERO_OF, ' sin ')
+    .replace(PERCENT, (_, n: string) => pct(n));
+  return normText(t);
 }
 
+const plainWord = (w: string | undefined): w is string => !!w && !STOP_WORDS.has(w) && !SIZE_TOKEN.test(w);
+
+/**
+ * Stemmed words of a normalised text, as tokens() keeps them, except that
+ * "sin X" is one word ("sin_gas"), "virgen extra" is one word and "AOVE" is
+ * "aceite oliva virgen extra".
+ */
+function matchWords(n: string): string[] {
+  const raw = n.split(' ');
+  const out: string[] = [];
+  const push = (w: string) => {
+    if (!out.includes(w)) out.push(w);
+  };
+  for (let i = 0; i < raw.length; i++) {
+    const w = raw[i]!;
+    if (w === 'sin') {
+      let j = i + 1;
+      while (j < raw.length && raw[j] !== 'sin' && STOP_WORDS.has(raw[j]!)) j++;
+      if (plainWord(raw[j])) {
+        push(`sin_${stem(raw[j]!)}`);
+        i = j;
+      }
+      continue;
+    }
+    if (w === 'aove') {
+      push('aceite');
+      push('oliva');
+      push(VIRGEN_EXTRA);
+    } else if (w === 'virgen' && raw[i + 1] === 'extra') {
+      push(VIRGEN_EXTRA);
+      i++;
+    } else if (plainWord(w)) push(stem(w));
+  }
+  return out;
+}
+
+/** Words of a brand phrase that name a variant: "bio" in "carrefour bio", "sin lactosa" in "puleva sin lactosa". */
+function brandVariantText(phrase: string): string {
+  const ws = phrase.split(' ');
+  const keep: string[] = [];
+  for (let i = 0; i < ws.length; i++) {
+    const w = ws[i]!;
+    if ((w === 'sin' && ws[i + 1]) || (w === 'virgen' && ws[i + 1] === 'extra')) keep.push(w, ws[++i]!);
+    else if (VARIANT_WORDS.has(stem(w))) keep.push(w);
+  }
+  return keep.join(' ');
+}
+
+/** Removes a brand phrase from a name, but keeps the variant words inside it ("Carrefour Bio" leaves "bio"). */
+function stripBrand(haystack: string, phrase: string): string {
+  if (!hasPhrase(haystack, phrase)) return haystack;
+  return ` ${haystack} `.split(` ${phrase} `).join(` ${brandVariantText(phrase)} `).replace(/\s+/g, ' ').trim();
+}
+
+interface NameWords {
+  /** Stemmed words, brands removed. */
+  words: string[];
+  /** Percentages ("70pct", "0pct"). */
+  pcts: string[];
+}
+
+/**
+ * The words of one side's name with every brand phrase (both sides' and every
+ * own brand) removed, plus the variant words of this side's own brand field
+ * ("Puleva Sin Lactosa" adds "sin_lactosa").
+ */
+function nameWords(name: string, ownBrand: string | null, brands: string[]): NameWords {
+  const pcts: string[] = [];
+  let n = matchText(name, pcts);
+  for (const b of brands) n = stripBrand(n, b);
+  for (const p of OWN_BRAND_PHRASES) n = stripBrand(n, p.phrase);
+  // A name that was only a brand ("Coca-Cola") keeps its words.
+  const words = matchWords(n);
+  if (!words.length) words.push(...matchWords(matchText(name)));
+  for (const b of (ownBrand ?? '').split(/[,;|]/)) {
+    for (const w of matchWords(brandVariantText(matchText(b)))) if (!words.includes(w)) words.push(w);
+  }
+  return { words, pcts };
+}
+
+/**
+ * Two words are the same word when equal, when one is the other plus one
+ * letter ("yogur", "yogurt"), or when the shorter is a long cut-off word
+ * ("semidesn" for "semidesnatada"). Not "salmon" / "salmonete", "naranja" /
+ * "naranjada" or "leche" / "lechera".
+ */
 function tokenMatch(a: string, b: string): boolean {
   if (a === b) return true;
-  return a.length >= 5 && b.length >= 5 && (a.startsWith(b) || b.startsWith(a));
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length < 5 || !long.startsWith(short)) return false;
+  return long.length - short.length <= 1 || short.length >= 8;
 }
 
 /**
  * 0..1: the F1 of the two word sets (words of the wanted name found in the
  * offer's, and the other way round), cut by 30 % per variant word on one side
- * only (lactosa, light, integral...), and capped at 0.6 when the head noun
- * (the wanted name's first word) is missing.
+ * only (lactosa, light, integral, sin gas...) and once more for a percentage
+ * that differs ("70 %" vs "85 %", or a "0 %" on one side only), and capped at
+ * 0.6 when the head noun (the wanted name's first word) is missing.
  */
-function nameScore(w: string[], o: string[]): number {
+function nameScore(wanted: NameWords, offer: NameWords): number {
+  const w = wanted.words;
+  const o = offer.words;
   if (!w.length || !o.length) return 0;
   const hitsW = w.filter((a) => o.some((b) => tokenMatch(a, b))).length;
   const hitsO = o.filter((b) => w.some((a) => tokenMatch(a, b))).length;
   const recall = hitsW / w.length;
   const precision = hitsO / o.length;
   let score = recall + precision > 0 ? (2 * recall * precision) / (recall + precision) : 0;
-  const variants = [...w.filter((a) => !o.includes(a)), ...o.filter((b) => !w.includes(b))].filter((x) => VARIANT_WORDS.has(x));
+  const variants = [...w.filter((a) => !o.some((b) => tokenMatch(a, b))), ...o.filter((b) => !w.some((a) => tokenMatch(a, b)))].filter(isVariant);
   score *= 0.7 ** variants.length;
+  const wp = wanted.pcts;
+  const op = offer.pcts;
+  const pctDiffers = wp.length && op.length
+    ? wp.some((p) => !op.includes(p)) || op.some((p) => !wp.includes(p))
+    : wp.includes('0pct') || op.includes('0pct');
+  if (pctDiffers) score *= 0.7;
   if (!o.some((b) => tokenMatch(w[0]!, b))) score = Math.min(score, 0.6);
   return Math.round(score * 1000) / 1000;
 }
@@ -249,8 +391,8 @@ export function scoreCandidate(wanted: WantedProduct, offer: Offer): { score: nu
   const oe = eanKey(offer.ean);
   if (we && oe && we === oe) return { score: 1, kind: 'exact' };
 
-  const brands = [...brandPhrases(wanted.brand), ...brandPhrases(offer.brand)];
-  const name = nameScore(nameStems(wanted.name, brands), nameStems(offer.name, brands));
+  const brands = [wanted.brand, offer.brand].flatMap((b) => (b ?? '').split(/[,;|]/).map((x) => matchText(x))).filter(Boolean);
+  const name = nameScore(nameWords(wanted.name, wanted.brand, brands), nameWords(offer.name, offer.brand, brands));
   const brand = brandRelation(wanted, offer);
   const size = sizeRelation(wantedSize(wanted), offerSize(offer));
 
@@ -272,10 +414,18 @@ export function scoreCandidate(wanted: WantedProduct, offer: Offer): { score: nu
 // ---------------------------------------------------------------------------
 
 /**
+ * A piece of `a` can stand in for one wanted piece of `b`: at most 3 % short
+ * (labels round, "0,97 L") and at most 20 % over. Matching is looser (+-20 %,
+ * see sizeRelation), but a smaller piece must never be costed as a whole one:
+ * five 800 g bags are 4 kg, not 5 kg.
+ */
+const fits = (a: number, b: number) => b > 0 && a >= b * 0.97 && a <= b * 1.2;
+
+/**
  * What it costs to buy `qty` of the wanted size with this offer, buying whole packs.
- * With both sizes known (same base unit): a pack that matches the wanted size
- * (+-20 %) counts one for one; a multipack of the wanted piece is bought by
- * pieces; otherwise packs = ceil(needed / pack). Without sizes, packs = qty.
+ * With both sizes known (same base unit): a multipack of the wanted piece is
+ * bought by pieces; otherwise packs = ceil(needed / pack), where a pack at most
+ * 3 % short of the wanted size counts as a whole one. Without sizes, packs = qty.
  * `leftover` is what is bought beyond the need (one piece of that total).
  */
 export function costFor(offer: Offer, wanted: Size | null, qty: number): { cents: number; packs: number; leftover: Size | null } {
@@ -290,24 +440,24 @@ export function costFor(offer: Offer, wanted: Size | null, qty: number): { cents
 
   let packs: number;
   let leftoverAmount = 0;
-  if (near(pack.amount, wanted.amount) && (pack.count > 1 || wanted.count > 1)) {
+  if (fits(pack.amount, wanted.amount) && (pack.count > 1 || wanted.count > 1)) {
     // Same piece, different pack: "6 x 1 L" for "1 L", "4 x 125 g" for "6 x 125 g".
     const pieces = q * wanted.count;
     packs = Math.ceil(pieces / pack.count);
     leftoverAmount = (packs * pack.count - pieces) * pack.amount;
-  } else if (near(pTotal, wTotal)) {
-    packs = q;
-  } else if (pack.count > 1 && near(pack.amount, wTotal)) {
+  } else if (pack.count > 1 && fits(pack.amount, wTotal)) {
     // A multipack whose piece is one wanted unit.
     packs = Math.ceil(q / pack.count);
     leftoverAmount = (packs * pack.count - q) * pack.amount;
-  } else if (wanted.count > 1 && near(pTotal, wanted.amount)) {
+  } else if (wanted.count > 1 && fits(pTotal, wanted.amount)) {
     // A single piece of a wanted multipack.
     packs = q * wanted.count;
   } else {
     const needed = q * wTotal;
-    packs = Math.max(1, Math.ceil(needed / pTotal - 1e-9));
-    leftoverAmount = packs * pTotal - needed;
+    // A pack a hair short of the wanted size ("0,97 L" for "1 L") counts as a whole one.
+    const per = pTotal < wTotal && fits(pTotal, wTotal) ? wTotal : pTotal;
+    packs = Math.max(1, Math.ceil(needed / per - 1e-9));
+    leftoverAmount = Math.max(0, packs * pTotal - needed);
   }
   leftoverAmount = Math.round(leftoverAmount * 1000) / 1000;
   return {
@@ -326,44 +476,99 @@ export function acceptable(kind: MatchKind, mode: HuntMode): boolean {
 
 const validOffer = (o: Offer) => Number.isFinite(o.priceCents) && o.priceCents > 0;
 const byId = (a: Offer, b: Offer) => (a.chain < b.chain ? -1 : a.chain > b.chain ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+const normQty = (qty: number | undefined) => Math.max(1, Number.isFinite(qty) ? Math.ceil(qty!) : 1);
+
+/** Most candidates a chain answers with. */
+const MAX_CANDIDATES = 5;
+/** Quantities whose picks rankCandidates always keeps, so a later change of quantity still finds its best pack. */
+const KEEP_FOR_QTY = [1, 24, 6, 12, 2, 3];
 
 /**
- * Scores and sorts a chain's offers for the wanted product, at most 5.
- * Exact mode: weak ones dropped; best kind, then score, then price.
- * Equivalent mode: acceptable ones first, cheapest for one wanted unit first.
+ * Can this candidate be bought on its own merit? Not when the wanted size is
+ * known and the offer's is not (a sizeless "Leche Pascual" for "6 x 1 L"):
+ * its cost cannot be checked, so it is listed for the user to choose but never
+ * picked. A matching EAN is the same product, so it always can.
  */
-export function rankCandidates(wanted: WantedProduct, offers: Offer[], mode: HuntMode): Candidate[] {
-  const size = wantedSize(wanted);
-  const scored = offers.filter(validOffer).map((o) => ({ ...o, ...scoreCandidate(wanted, o) }) as Candidate);
-  const list = mode === 'exact' ? scored.filter((c) => c.kind !== 'weak') : scored;
-  const cost = new Map(list.map((c) => [c, costFor(c, size, 1).cents]));
-  list.sort((a, b) => {
-    if (mode === 'exact') {
-      return KIND_RANK[a.kind] - KIND_RANK[b.kind] || b.score - a.score || a.priceCents - b.priceCents || byId(a, b);
-    }
-    const okA = acceptable(a.kind, mode) ? 0 : 1;
-    const okB = acceptable(b.kind, mode) ? 0 : 1;
-    return okA - okB || cost.get(a)! - cost.get(b)! || b.score - a.score || byId(a, b);
-  });
-  return list.slice(0, 5);
+function pickable(c: Candidate, wanted: WantedProduct, size: Size | null): boolean {
+  if (!validOffer(c)) return false;
+  if (!size || offerSize(c)) return true;
+  const we = eanKey(wanted.ean);
+  return !!we && we === eanKey(c.ean);
 }
 
 /**
- * The offer to buy at one chain.
- * Exact mode: the best exact (then same-brand) match by score, then cost.
- * Equivalent mode: the cheapest acceptable match for the needed amount.
+ * The order picks are made in, best first.
+ * Exact mode: exact before same-brand. Every exact candidate is the wanted
+ * product (perhaps in another pack), so the cheapest for the needed amount
+ * wins; same-brand ones are variants, so the closest wins, then the cheapest.
+ * Equivalent mode: the cheapest for the needed amount, then the closest.
+ */
+function pickOrder(mode: HuntMode, cost: (c: Candidate) => number): (a: Candidate, b: Candidate) => number {
+  const score2 = (c: Candidate) => Math.round(c.score * 100);
+  return (a, b) => {
+    if (mode === 'exact') {
+      return (
+        KIND_RANK[a.kind] - KIND_RANK[b.kind]
+        || (a.kind === 'exact' ? 0 : score2(b) - score2(a))
+        || cost(a) - cost(b)
+        || b.score - a.score
+        || byId(a, b)
+      );
+    }
+    return cost(a) - cost(b) || b.score - a.score || byId(a, b);
+  };
+}
+
+function costMemo(size: Size | null, qty: number): (c: Candidate) => number {
+  const memo = new Map<Candidate, number>();
+  return (c) => {
+    let v = memo.get(c);
+    if (v === undefined) memo.set(c, (v = costFor(c, size, qty).cents));
+    return v;
+  };
+}
+
+/**
+ * Scores and sorts a chain's offers for the wanted product, at most 5, in the
+ * order pickBest would choose them for `qty` (default 1): candidates it can
+ * pick first, then the rest. Exact mode drops weak ones and lists by kind.
+ * The 5 always include the picks for other quantities too (1, 2, 3, 6, 12,
+ * 24), so a 6-pack that is the best buy for six is never cut for being dear
+ * for one.
+ */
+export function rankCandidates(wanted: WantedProduct, offers: Offer[], mode: HuntMode, qty = 1): Candidate[] {
+  const size = wantedSize(wanted);
+  const q = normQty(qty);
+  const scored = offers.filter(validOffer).map((o) => ({ ...o, ...scoreCandidate(wanted, o) }) as Candidate);
+  const list = mode === 'exact' ? scored.filter((c) => c.kind !== 'weak') : scored;
+  const order = pickOrder(mode, costMemo(size, q));
+  const rank = (c: Candidate) => (acceptable(c.kind, mode) && pickable(c, wanted, size) ? 0 : 1);
+  list.sort((a, b) => {
+    if (mode === 'exact') return KIND_RANK[a.kind] - KIND_RANK[b.kind] || rank(a) - rank(b) || order(a, b);
+    return rank(a) - rank(b) || order(a, b);
+  });
+  const keep = new Set<Candidate>();
+  for (const n of [q, ...KEEP_FOR_QTY]) {
+    if (keep.size >= MAX_CANDIDATES) break;
+    const p = pickBest(list, mode, wanted, n);
+    if (p) keep.add(p);
+  }
+  let room = MAX_CANDIDATES - keep.size;
+  return list.filter((c) => keep.has(c) || room-- > 0);
+}
+
+/**
+ * The offer to buy at one chain, for `qty` wanted units.
+ * Exact mode: an exact match (the cheapest for the needed amount), else the
+ * closest same-brand one. Equivalent mode: the cheapest acceptable match for
+ * the needed amount. An offer whose size is unknown while the wanted one is
+ * known is never picked (see pickable).
  */
 export function pickBest(candidates: Candidate[], mode: HuntMode, wanted: WantedProduct, qty: number): Candidate | null {
   const size = wantedSize(wanted);
-  const q = Math.max(1, Number.isFinite(qty) ? qty : 1);
-  const ok = candidates.filter((c) => validOffer(c) && acceptable(c.kind, mode));
+  const ok = candidates.filter((c) => acceptable(c.kind, mode) && pickable(c, wanted, size));
   if (!ok.length) return null;
-  const cost = new Map(ok.map((c) => [c, costFor(c, size, q).cents]));
-  const score2 = (c: Candidate) => Math.round(c.score * 100);
-  ok.sort((a, b) => {
-    if (mode === 'exact') return KIND_RANK[a.kind] - KIND_RANK[b.kind] || score2(b) - score2(a) || cost.get(a)! - cost.get(b)! || byId(a, b);
-    return cost.get(a)! - cost.get(b)! || b.score - a.score || byId(a, b);
-  });
+  ok.sort(pickOrder(mode, costMemo(size, normQty(qty))));
   return ok[0]!;
 }
 

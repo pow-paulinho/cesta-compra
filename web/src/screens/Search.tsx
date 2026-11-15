@@ -10,7 +10,7 @@ import { Popover } from '../components/ui';
 import { greeting } from '../lib/format';
 import { DUR, EASE_OUT } from '../lib/motion';
 import { navigate, openOverlay, useRoute } from '../lib/router';
-import { sourceName, useSearch, type SourceState } from '../lib/search';
+import { forgetSearch, sourceName, useSearch, type SourceState } from '../lib/search';
 import { addRecent, clearRecent, useStore } from '../lib/store';
 import { rememberProducts } from '../lib/products';
 
@@ -59,7 +59,11 @@ export function SearchScreen() {
     addRecent(v);
     input.current?.blur();
     if (v === q) setAttempt((a) => a + 1);
-    else navigate('/buscar', { q: v });
+    else {
+      // A search the person asks for is always fresh; only going back and forth reuses results.
+      forgetSearch(v);
+      navigate('/buscar', { q: v });
+    }
   };
 
   const open = (p: Product) => {

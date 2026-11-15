@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { searchProducts } from '../src/api';
 import {
-  catalogueSearch, chainIdOf, eanVariants, fallbackOffers, likePatterns, rowToOffer, wordPattern,
+  catalogueSearch, chainIdOf, eanVariants, fallbackOffers, likePatterns, rowToOffer, searchWords, wordPattern,
 } from '../src/live/fallback';
+import { seedDemo } from '../src/store';
 
 /*
  * The SQL runs for real here: a D1 stand-in over Node's built-in SQLite, with the
@@ -19,14 +21,23 @@ function d1(): { db: D1Database; raw: SqliteDb; sql: string[] } {
   const raw = new sqlite!.DatabaseSync(':memory:');
   raw.exec(fs!.readFileSync(new URL('../migrations/0001_prices.sql', here), 'utf8'));
   const sql: string[] = [];
+  const statement = (q: string, v: unknown[] = []) => ({
+    bind: (...b: unknown[]) => statement(q, b),
+    all: async () => ({ results: raw.prepare(q).all(...v).map((r) => ({ ...(r as object) })) }),
+    first: async () => ({ ...(raw.prepare(q).all(...v)[0] as object) }),
+    run: async () => {
+      raw.prepare(q).run(...v);
+      return { success: true };
+    },
+  });
   const db = {
     prepare(q: string) {
       sql.push(q);
-      return {
-        bind: (...v: unknown[]) => ({
-          all: async () => ({ results: raw.prepare(q).all(...v).map((r) => ({ ...(r as object) })) }),
-        }),
-      };
+      return statement(q);
+    },
+    batch: async (stmts: Array<{ run(): Promise<unknown> }>) => {
+      for (const s of stmts) await s.run();
+      return [];
     },
   } as unknown as D1Database;
   return { db, raw, sql };
@@ -170,5 +181,101 @@ describe.skipIf(!sqlite || !fs)('the D1 catalogue as a fallback', () => {
     expect((await catalogueSearch(db, '8410173072025')).map((p) => p.name)).toEqual(['Lasaña Fácil']);
     expect(await catalogueSearch(db, '_%')).toEqual([]);
     expect(await catalogueSearch(db, '%%')).toEqual([]);
+  });
+
+  it('folds accents, ñ and plurals on both sides', async () => {
+    expect(searchWords('Atún claro')).toEqual(['atun', 'claro']);
+    expect(searchWords('huevos camperos')).toEqual(['huevo', 'campero']);
+    expect(searchWords('té')).toEqual(['te']);
+    const { db, raw } = d1();
+    seed(raw);
+    const product = raw.prepare('INSERT INTO products (ean, name, brand, size) VALUES (?, ?, ?, ?)');
+    product.run('8000000000010', 'Atún claro en aceite de oliva', 'Calvo', '3 x 80 g');
+    product.run('8000000000011', 'Huevo campero L', "Rio d'Oro", '12 ud');
+    expect((await catalogueSearch(db, 'atun')).map((p) => p.ean)).toEqual(['8000000000010']);
+    expect((await catalogueSearch(db, 'ATÚN Calvo')).map((p) => p.ean)).toEqual(['8000000000010']);
+    expect((await catalogueSearch(db, 'lasana')).map((p) => p.name)).toEqual(['Lasaña Fácil']);
+    expect((await catalogueSearch(db, 'huevos')).map((p) => p.ean)).toEqual(['8000000000011']);
+    expect((await catalogueSearch(db, "rio d'oro")).map((p) => p.ean)).toEqual(['8000000000011']);
+    // "leche" is not "lechuga" any more.
+    product.run('8000000000012', 'Lechuga iceberg', null, null);
+    expect((await catalogueSearch(db, 'leche')).map((p) => p.name)).not.toContain('Lechuga iceberg');
+  });
+
+  it('finds the priced products of a short query after the demo set is seeded (atún)', async () => {
+    const { db, raw } = d1();
+    await seedDemo(db);
+    const product = raw.prepare('INSERT INTO products (ean, name, brand, size) VALUES (?, ?, ?, ?)');
+    const price = raw.prepare('INSERT INTO prices (ean, chain, source, price_cents, observed_on, place) VALUES (?, ?, ?, ?, ?, NULL)');
+    product.run('8410000810004', 'Atún claro en aceite de girasol', 'Calvo', '3 x 65 g');
+    product.run('8480000105767', 'Atún claro al natural', 'Hacendado', '3 x 52 g');
+    product.run('8410000000001', 'Leche entera', 'Pascual', '1 l');
+    product.run('8410000000002', 'Galletas maría', 'Fontaneda', '800 g');
+    product.run('8410000000003', 'Tomate frito', 'Orlando', '350 g');
+    price.run('8410000810004', 'Carrefour', 'open_prices', 389, '2026-11-02');
+    price.run('8480000105767', 'Mercadona', 'open_prices', 215, '2026-11-10');
+    price.run('8410000000001', 'Mercadona', 'open_prices', 105, '2026-11-10');
+    price.run('8410000000002', 'Lidl', 'open_prices', 199, '2026-11-08');
+    price.run('8410000000003', 'BM', 'open_prices', 129, '2026-11-01');
+    const found = await catalogueSearch(db, 'atún', 'open_prices');
+    expect(found.slice(0, 2).map((p) => p.ean).sort()).toEqual(['8410000810004', '8480000105767']);
+    expect(found.slice(0, 2).every((p) => p.offers.length === 1)).toBe(true);
+    // Nothing that merely shares letters with "atun" (Nutella, Tortiglioni...).
+    for (const p of found) expect(`${p.name} ${p.brand ?? ''}`.toLowerCase()).toMatch(/at[uú]n/);
+  });
+
+  it('chooses which products to show among the priced ones before the cut, not in table order', async () => {
+    const { db, raw } = d1();
+    const product = raw.prepare('INSERT INTO products (ean, name, brand, size) VALUES (?, ?, ?, ?)');
+    const price = raw.prepare('INSERT INTO prices (ean, chain, source, price_cents, observed_on, place) VALUES (?, ?, ?, ?, ?, NULL)');
+    // 40 matches first in table order: no price, or a price at a chain that is not ours.
+    for (let i = 0; i < 40; i++) {
+      const ean = String(8100000000000 + i);
+      product.run(ean, `Leche de avena sabor ${i}`, null, '1 l');
+      if (i % 2) price.run(ean, 'Dia', 'open_prices', 150, '2026-11-12');
+    }
+    product.run('8410000000001', 'Leche entera', 'Pascual', '1 l');
+    price.run('8410000000001', 'Mercadona', 'open_prices', 105, '2026-11-10');
+    product.run('8410000000002', 'Batido con leche', 'Puleva', '1 l');
+    price.run('8410000000002', 'Lidl', 'open_prices', 99, '2026-11-11');
+    const found = await catalogueSearch(db, 'leche', 'open_prices');
+    expect(found).toHaveLength(30);
+    // Priced first; among them the one whose name starts with the word, then the other.
+    expect(found.slice(0, 2).map((p) => p.ean)).toEqual(['8410000000001', '8410000000002']);
+    expect(found.slice(2).every((p) => p.offers.length === 0)).toBe(true);
+  });
+
+  it('the older /api/products search also picks priced products before its cut', async () => {
+    const { db, raw } = d1();
+    const product = raw.prepare('INSERT INTO products (ean, name, brand, size) VALUES (?, ?, ?, ?)');
+    const price = raw.prepare('INSERT INTO prices (ean, chain, source, price_cents, observed_on, place) VALUES (?, ?, ?, ?, ?, NULL)');
+    for (let i = 0; i < 40; i++) product.run(String(8100000000000 + i), `Leche sin precio ${i}`, null, '1 l');
+    product.run('8410000000001', 'Leche entera', 'Pascual', '1 l');
+    price.run('8410000000001', 'Mercadona', 'open_prices', 105, '2026-11-10');
+    const r = await searchProducts(db, 'leche', new Date('2026-11-15T00:00:00Z'));
+    expect(r.products.map((p) => p.ean)).toEqual(['8410000000001']);
+  });
+
+  it('reads candidates per chain in a hunt, so chains with older observations are not starved', async () => {
+    const { db, raw } = d1();
+    const product = raw.prepare('INSERT INTO products (ean, name, brand, size) VALUES (?, ?, ?, ?)');
+    const price = raw.prepare('INSERT INTO prices (ean, chain, source, price_cents, observed_on, place) VALUES (?, ?, ?, ?, ?, NULL)');
+    const chains: Array<[string, string]> = [
+      ['Mercadona', '2026-11-12'], ['Carrefour', '2026-11-11'], ['Lidl', '2026-11-10'], ['BM', '2026-11-09'], ['El Corte Inglés', '2026-10-01'],
+    ];
+    chains.forEach(([chain, day], c) => {
+      for (let i = 0; i < 45; i++) {
+        const ean = String(8200000000000 + c * 100 + i);
+        product.run(ean, `Leche entera ${chain} ${i}`, null, '1 l');
+        price.run(ean, chain, 'open_prices', 90 + i, day);
+      }
+    });
+    const out = await fallbackOffers(db, { name: 'Leche entera', brand: null, sizeText: null, ean: null },
+      ['mercadona', 'carrefour', 'lidl', 'bm', 'supercor'], { mode: 'equivalent' });
+    for (const id of ['mercadona', 'carrefour', 'lidl', 'bm', 'supercor'] as const) {
+      expect(out[id]?.length, id).toBe(40);
+      // The cheapest of the chain's newest rows come first.
+      expect(out[id]![0]!.priceCents).toBe(90);
+    }
   });
 });
