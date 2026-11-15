@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import type { HuntMode, Offer, Product, ProductDetails } from '@shared/types';
 import { CHAINS } from '@shared/chains';
 import { formatEuros } from '@shared/units';
+import { Ticker } from '../components/feedback';
 import { Icon } from '../components/Icon';
 import { cheapest } from '../components/ProductCard';
 import { useSheetDrag } from '../components/Sheet';
@@ -13,7 +14,7 @@ import { countsInMode } from '../lib/cart';
 import { daysSince, shortDate, STALE_DAYS, unitPriceLabel } from '../lib/format';
 import { enqueue } from '../lib/hunt';
 import { DUR, EASE_OUT } from '../lib/motion';
-import { findProduct, loadDetails } from '../lib/products';
+import { loadDetails, useProduct } from '../lib/products';
 import { closeOverlay, hrefFor } from '../lib/router';
 import { getState, newId, setState, useStore, type CartItem } from '../lib/store';
 import { toast } from '../lib/toast';
@@ -24,7 +25,11 @@ const MODE_HELP: Record<HuntMode, string> = {
 };
 
 export function Ficha({ productKey }: { productKey: string }) {
-  const product = useMemo(() => findProduct(productKey), [productKey]);
+  // Live view of the product: offers that reach the search after the sheet opened still show up.
+  const seen = useProduct(productKey);
+  // Opened from the cart after a reload: the cart keeps its own copy.
+  const fromCart = useStore((s) => s.cart.find((i) => i.product.key === productKey)?.product);
+  const product = useMemo<Product | null>(() => seen ?? (fromCart ? { ...fromCart } : null), [seen, fromCart]);
   if (!product) {
     return (
       <div className="empty">
@@ -110,7 +115,9 @@ function FichaBody({ product: p }: { product: Product }) {
       <div className="ficha-price">
         {best ? (
           <>
-            <span className="big">Desde {formatEuros(best.priceCents)}</span>
+            <span className="big">
+              Desde <Ticker cents={best.priceCents} duration={0.4} />
+            </span>
             <span className="muted" style={{ fontWeight: 800 }}>
               en {CHAINS[best.chain]?.name ?? best.chain}
             </span>
@@ -180,24 +187,34 @@ function FichaBody({ product: p }: { product: Product }) {
             </Popover>
           </div>
           <ul className="price-list" style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-            {offers.map((o) => (
-              <li key={`${o.chain}-${o.id}`} className={`price-row ${o === best && offers.length > 1 ? 'best' : ''}`}>
-                <ChainDot chain={o.chain} />
-                <span className="who">
-                  <b>{CHAINS[o.chain]?.name ?? o.chain}</b>
-                  <span className="tags">
-                    {sourceTags(o)}
-                    {o.promo && <span className="tag promo">{o.promo}</span>}
+            <AnimatePresence initial={false}>
+              {offers.map((o) => (
+                <motion.li
+                  key={`${o.chain}-${o.id}`}
+                  layout="position"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: DUR.base, ease: EASE_OUT }}
+                  className={`price-row ${o === best && offers.length > 1 ? 'best' : ''}`}
+                >
+                  <ChainDot chain={o.chain} />
+                  <span className="who">
+                    <b>{CHAINS[o.chain]?.name ?? o.chain}</b>
+                    <span className="tags">
+                      {sourceTags(o)}
+                      {o.promo && <span className="tag promo">{o.promo}</span>}
+                    </span>
                   </span>
-                </span>
-                <span className="amount">
-                  {formatEuros(o.priceCents)}
-                  <span className="unit" style={{ display: 'block' }}>
-                    {unitPriceLabel(o) ?? ''}
+                  <span className="amount">
+                    {formatEuros(o.priceCents)}
+                    <span className="unit" style={{ display: 'block' }}>
+                      {unitPriceLabel(o) ?? ''}
+                    </span>
                   </span>
-                </span>
-              </li>
-            ))}
+                </motion.li>
+              ))}
+            </AnimatePresence>
           </ul>
         </section>
       )}
@@ -218,17 +235,25 @@ function Details({ ean, initial }: { ean: string; initial?: ProductDetails }) {
     details: initial ?? null,
   });
   const [attempt, setAttempt] = useState(0);
+  // The product can gain details while the sheet is open (search still streaming);
+  // read the latest preview without refetching for it.
+  const latest = useRef(initial);
+  latest.current = initial;
+  const full = isFull(initial);
   useEffect(() => {
-    if (isFull(initial) && attempt === 0) return;
+    if (full && attempt === 0) {
+      setState({ phase: 'ok', details: latest.current ?? null });
+      return;
+    }
     let alive = true;
-    setState((s) => ({ ...s, phase: 'loading' }));
+    setState((s) => ({ ...s, phase: s.details && isFull(s.details) ? s.phase : 'loading' }));
     loadDetails(ean)
-      .then((details) => alive && setState({ phase: 'ok', details: details ? { ...(initial ?? {}), ...details } : initial ?? null }))
+      .then((details) => alive && setState({ phase: 'ok', details: details ? { ...(latest.current ?? {}), ...details } : latest.current ?? null }))
       .catch(() => alive && setState({ phase: 'error', details: null }));
     return () => {
       alive = false;
     };
-  }, [ean, initial, attempt]);
+  }, [ean, full, attempt]);
 
   const d = state.details;
   return (

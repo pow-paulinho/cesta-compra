@@ -1,10 +1,10 @@
 /** Streaming product search: /api/search NDJSON, merged per product key as sources answer. */
 import { useEffect, useRef, useState } from 'react';
-import type { ChainStatus, Offer, Product, SearchEvent, SearchSource } from '@shared/types';
+import type { ChainStatus, Product, SearchEvent, SearchSource } from '@shared/types';
 import { CHAINS } from '@shared/chains';
 import { liveHeaders, searchUrl } from './api';
 import { errorMessage, NETWORK_ERROR, readNdjson } from './ndjson';
-import { rememberProducts } from './products';
+import { mergeInto, rememberProducts } from './products';
 
 export interface SourceState {
   source: SearchSource;
@@ -31,30 +31,6 @@ export function sourceName(s: SearchSource): string {
   if (s === 'catalogo') return 'Catálogo';
   if (s === 'openfoodfacts') return 'Open Food Facts';
   return CHAINS[s]?.name ?? s;
-}
-
-function offerKey(o: Offer) {
-  return `${o.chain}|${o.id}|${o.source}`;
-}
-
-/** Merges a product into the list (same key: offers joined, gaps filled). */
-export function mergeProduct(list: Product[], p: Product): Product[] {
-  const idx = list.findIndex((x) => x.key === p.key);
-  if (idx < 0) return [...list, p];
-  const a = list[idx]!;
-  const seen = new Set(a.offers.map(offerKey));
-  const merged: Product = {
-    ...a,
-    brand: a.brand ?? p.brand,
-    sizeText: a.sizeText ?? p.sizeText,
-    ean: a.ean ?? p.ean,
-    image: a.image ?? p.image,
-    offers: [...a.offers, ...p.offers.filter((o) => !seen.has(offerKey(o)))],
-    ...(a.details || p.details ? { details: { ...(p.details ?? {}), ...(a.details ?? {}) } } : {}),
-  };
-  const out = list.slice();
-  out[idx] = merged;
-  return out;
 }
 
 const blank = (q: string): SearchState => ({
@@ -94,7 +70,7 @@ export function useSearch(q: string, liveKey: string, demo: boolean, attempt: nu
             const entry: SourceState = { source: ev.source, status: ev.status, count: ev.products.length, ...(ev.reason ? { reason: ev.reason } : {}) };
             const sources = has ? s.sources.map((x) => (x.source === ev.source ? entry : x)) : [...s.sources, entry];
             let products = s.products;
-            for (const p of ev.products) products = mergeProduct(products, p);
+            for (const p of ev.products) products = mergeInto(products, p);
             return { ...s, sources, products };
           });
         });
