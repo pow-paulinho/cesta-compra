@@ -3,7 +3,7 @@ import { defaultDeps, json, readBodyText, type LiveDeps } from './live/common';
 import { handleDetails, liveStatus } from './live/details';
 import { handleHunt } from './live/hunt';
 import { handleSearch } from './live/search';
-import { fetchOpenPrices } from './sources/openprices';
+import { fetchOpenPrices, type FetchPlan, type OpenPrice } from './sources/openprices';
 import { logImport, saveOpenPrices, seedDemo, status } from './store';
 
 export interface Env {
@@ -18,13 +18,76 @@ export function health(): { ok: true; app: string } {
   return { ok: true, app: 'cesta-compra' };
 }
 
-/** The daily import: demo prices (idempotent), then Open Prices, politely. */
-export async function runImport(env: Env, now = new Date(), doFetch: typeof fetch = fetch) {
+/** How long one Open Prices request may take, body included, before the import moves on. */
+export const IMPORT_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * A fetch for the importer that never throws: a network error, a timeout (15 s, body
+ * included) or a 200 whose body is not JSON comes back as an empty error answer, which the
+ * importer skips like any other failed page; error bodies are cancelled, not left open. So
+ * one bad request costs one page, never the whole run.
+ */
+export function sturdyFetch(doFetch: typeof fetch, failures: { count: number; last: string | null }, timeoutMs = IMPORT_REQUEST_TIMEOUT_MS): typeof fetch {
+  const failed = (status: number, why: string): Response => {
+    failures.count += 1;
+    failures.last = why;
+    return new Response(null, { status });
+  };
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    // Abort plus a race, so a fetch that ignores the signal still gives up.
+    const ac = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        ac.abort();
+        reject(new Error(`timeout after ${timeoutMs} ms`));
+      }, timeoutMs);
+    });
+    deadline.catch(() => undefined);
+    try {
+      const res = await Promise.race([doFetch(input, { ...init, signal: ac.signal }), deadline]);
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        return failed(res.status, `HTTP ${res.status}`);
+      }
+      const text = await Promise.race([res.text(), deadline]);
+      try {
+        JSON.parse(text);
+      } catch {
+        return failed(502, 'answer is not JSON');
+      }
+      return new Response(text, { status: res.status, headers: res.headers });
+    } catch (err) {
+      return failed(504, err instanceof Error ? err.message : String(err));
+    } finally {
+      clearTimeout(timer);
+    }
+  }) as typeof fetch;
+}
+
+export interface ImportOptions {
+  plan?: FetchPlan;
+  wait?: (ms: number) => Promise<void>;
+}
+
+/**
+ * The daily import: demo prices (idempotent), then Open Prices, politely. A request that
+ * fails is skipped (sturdyFetch), the prices read are saved, and the run is always logged,
+ * also when saving fails; failed requests go to the Worker log.
+ */
+export async function runImport(env: Env, now = new Date(), doFetch: typeof fetch = fetch, opts: ImportOptions = {}) {
   const demo = await seedDemo(env.DB);
-  const { prices, requests, skipped } = await fetchOpenPrices(doFetch);
-  const saved = await saveOpenPrices(env.DB, prices);
-  await logImport(env.DB, 'open_prices', requests, saved, skipped, now);
-  return { demo, openPrices: saved, requests, skipped };
+  const failures = { count: 0, last: null as string | null };
+  let read = { prices: [] as OpenPrice[], requests: 0, skipped: 0 };
+  let saved = 0;
+  try {
+    read = await fetchOpenPrices(sturdyFetch(doFetch, failures), opts.plan, opts.wait);
+    saved = await saveOpenPrices(env.DB, read.prices);
+  } finally {
+    if (failures.count) console.warn(`open prices import: ${failures.count} of ${read.requests} requests failed (last: ${failures.last})`);
+    await logImport(env.DB, 'open_prices', read.requests, saved, read.skipped, now);
+  }
+  return { demo, openPrices: saved, requests: read.requests, skipped: read.skipped, failed: failures.count };
 }
 
 /* One set of live dependencies per isolate, so the polite fetch's per-host spacing holds
