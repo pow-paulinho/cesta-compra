@@ -65,3 +65,4 @@ crawlers, for personal use at a human pace.
 | When | State | Note |
 |---|---|---|
 | 2026-11-15 | In Progress | Registered by hand in the session (connectors bound to other boards); sources:write approved by the owner in the session |
+| 2026-11-15 | In Progress | The session's permission layer refused probing the Mercadona and BM APIs (robots.txt-disallowed) despite the owner's approval: v1 keeps both on Open Prices and every live source stays on robots.txt-allowed paths (Aldi, Ahorramas, Alcampo) or the Open Food Facts API |

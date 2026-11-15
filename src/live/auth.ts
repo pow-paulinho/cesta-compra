@@ -7,14 +7,16 @@
  *
  * The key is never logged and never echoed back.
  */
+import type { LiveAccess } from '../shared/types';
+
+/** Why a request is or is not allowed to search live (no secret values in it). */
+export type { LiveAccess };
+
 export const LIVE_KEY_HEADER = 'x-live-key';
 
 export interface LiveKeyEnv {
   LIVE_KEY?: string;
 }
-
-/** Why a request is or is not allowed to search live (no secret values in it). */
-export type LiveAccess = 'ok' | 'disabled' | 'missing' | 'wrong';
 
 const encoder = new TextEncoder();
 

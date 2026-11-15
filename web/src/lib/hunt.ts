@@ -3,7 +3,8 @@
  * cancellable, and pending hunts resume after a reload.
  */
 import { useSyncExternalStore } from 'react';
-import type { ChainId, HuntEvent, HuntRequest } from '@shared/types';
+import type { ChainId, HuntEvent } from '@shared/types';
+import { huntBody, liveHeaders } from './api';
 import { errorMessage, NETWORK_ERROR, readNdjson } from './ndjson';
 import { getState, updateItem, type CartItem, type ChainHunt } from './store';
 
@@ -139,17 +140,14 @@ async function run(item: CartItem) {
   setProgress({ current: item.product.name });
   updateItem(item.id, (i) => ({ ...i, hunt: { ...i.hunt, status: 'running' } }));
   const { settings } = getState();
-  const body: HuntRequest & { demo?: boolean } = {
-    product: { name: item.product.name, brand: item.product.brand, sizeText: item.product.sizeText, ean: item.product.ean },
-    mode: item.mode,
-    chains: settings.chains,
-    ...(settings.demo ? { demo: true } : {}),
-  };
+  const body = huntBody(item, settings);
+  // The server answers all 8 chains; the ones left out say 'unavailable' and are not shown.
+  const asked = new Set<ChainId>(settings.chains);
   const timer = setTimeout(() => ctrl.abort('timeout'), TIMEOUT_MS);
   try {
     const res = await fetch('/api/hunt', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(settings.liveKey ? { 'x-live-key': settings.liveKey } : {}) },
+      headers: { 'content-type': 'application/json', ...liveHeaders(settings.liveKey) },
       body: JSON.stringify(body),
       signal: ctrl.signal,
     });
@@ -158,7 +156,7 @@ async function run(item: CartItem) {
       return;
     }
     await readNdjson<HuntEvent>(res.body, (ev) => {
-      if (ev.type !== 'chain') return;
+      if (ev.type !== 'chain' || !asked.has(ev.chain)) return;
       updateItem(item.id, (i) =>
         i.hunt.status !== 'running'
           ? i

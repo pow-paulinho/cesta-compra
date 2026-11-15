@@ -7,7 +7,9 @@
     "types": ["@cloudflare/workers-types"],
     "strict": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // test/web-contract.test.ts reaches the web app's pure API module, which imports @shared.
+    "paths": { "@shared/*": ["./src/shared/*"] }
   },
   "include": ["src", "test"]
 }

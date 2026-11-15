@@ -11,9 +11,15 @@ export const wantedOf = (i: CartItem): WantedProduct => ({
   ean: i.product.ean,
 });
 
+/** Whether a known price counts in this mode: demo and Open Prices are never mixed, live always counts. */
+export const countsInMode = (o: Pick<Offer, 'source'>, demo: boolean): boolean => o.source !== (demo ? 'open_prices' : 'demo');
+
 /**
  * The offer an item uses at a chain: the user's choice, else the best pick for
  * the quantity, else (before the hunt answers) the cheapest price known from the search.
+ * A hunt answer of any status counts (a locked chain may carry the catalogue's prices).
+ * Like the server, demo and Open Prices prices are never mixed: demo mode uses demo
+ * prices, otherwise Open Prices; live prices count either way.
  */
 export function chainOffer(item: CartItem, chain: ChainId, settings: Pick<Settings, 'demo'>): Offer | Candidate | null {
   const h = item.hunt.chains[chain];
@@ -26,7 +32,7 @@ export function chainOffer(item: CartItem, chain: ChainId, settings: Pick<Settin
     return pickBest(h.candidates, item.mode, wantedOf(item), item.qty) ?? h.pick;
   }
   const known = item.product.offers
-    .filter((o) => o.chain === chain && o.priceCents > 0 && (settings.demo || o.source !== 'demo'))
+    .filter((o) => o.chain === chain && o.priceCents > 0 && countsInMode(o, settings.demo))
     .sort((a, b) => a.priceCents - b.priceCents);
   return known[0] ?? null;
 }

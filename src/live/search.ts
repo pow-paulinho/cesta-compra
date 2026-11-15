@@ -7,12 +7,14 @@
  *     otherwise it answers 'locked' at once and is never called;
  *   - Open Food Facts, when its provider is wired (no key needed);
  *   - 'catalogo': the D1 catalogue (Open Prices; the demo set with ?demo=1).
+ * A chain marked live without an adapter on this server, and Open Food Facts when it is not
+ * wired, answer 'unavailable' with the reason, so the client never waits for them.
  * One source failing never stops the others.
  */
 import { CHAINS } from '../shared/chains';
 import { CHAIN_IDS, type SearchEvent } from '../shared/types';
 import { liveAccess, lockedReason, type LiveKeyEnv } from './auth';
-import { dedupeProducts, failure, groupProducts, json, liveAdapter, runAdapter, withDeadline, adapterCtx, type LiveDeps } from './common';
+import { adapterCtx, dedupeProducts, failure, fallbackReason, groupProducts, json, liveAdapter, runAdapter, withDeadline, type LiveDeps } from './common';
 import { catalogueSearch } from './fallback';
 import { ndjsonStream } from './ndjson';
 
@@ -45,7 +47,13 @@ export function handleSearch(request: Request, env: SearchEnv, deps: LiveDeps, w
 
     for (const id of CHAIN_IDS) {
       const adapter = liveAdapter(id, deps.adapters);
-      if (!adapter) continue;
+      if (!adapter) {
+        // Marked live but not wired here: its prices come from the catalogue only.
+        if (CHAINS[id].mode === 'live') {
+          tasks.push(emit({ type: 'source', source: id, status: 'unavailable', products: [], reason: fallbackReason(id), ms: ms() } satisfies SearchEvent));
+        }
+        continue;
+      }
       const name = CHAINS[id].name;
       if (access !== 'ok') {
         tasks.push(emit({ type: 'source', source: id, status: 'locked', products: [], reason: lockedReason(access, name), ms: ms() } satisfies SearchEvent));
@@ -77,6 +85,11 @@ export function handleSearch(request: Request, env: SearchEnv, deps: LiveDeps, w
         }
         await emit(event);
       })());
+    } else {
+      tasks.push(emit({
+        type: 'source', source: 'openfoodfacts', status: 'unavailable', products: [],
+        reason: 'Open Food Facts no está conectado en este servidor: verás los productos del catálogo, sin sus fotos.', ms: ms(),
+      } satisfies SearchEvent));
     }
 
     tasks.push((async () => {

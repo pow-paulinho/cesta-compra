@@ -6,3 +6,5 @@ CLAUDE.local.md
 node_modules/
 .wrangler/
 .DS_Store
+.dev.vars
+dist/

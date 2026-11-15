@@ -75,7 +75,12 @@ export interface WantedProduct {
 export interface HuntRequest {
   product: WantedProduct;
   mode: HuntMode;
+  /** Chains to search; the others answer 'unavailable'. Omitted: all of them. */
   chains?: ChainId[];
+  /** Read the demo prices instead of Open Prices for the chains that answer from the catalogue. */
+  demo?: boolean;
+  /** Units wanted (1 to 99, default 1); the server's pick buys enough packs for it. */
+  qty?: number;
 }
 
 export type MatchKind = 'exact' | 'same-brand' | 'equivalent' | 'weak';
@@ -96,7 +101,12 @@ export interface ChainInfo {
   reason?: string;
 }
 
+/** Why a request may or may not search live: no key on the server, none sent, a wrong one, or ok. */
+export type LiveAccess = 'ok' | 'disabled' | 'missing' | 'wrong';
+
 export interface LiveStatus {
   live: boolean;
   chains: ChainInfo[];
+  /** Sent by the Worker (never the key itself); optional so older servers still fit. */
+  access?: LiveAccess;
 }

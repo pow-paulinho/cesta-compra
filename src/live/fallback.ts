@@ -148,8 +148,8 @@ export interface FallbackOptions {
 
 /**
  * Offers from D1 for the wanted product, per chain. By EAN when one is known; by name for
- * the chains the EAN did not find (exact mode) or always (equivalent mode, where another
- * brand is welcome). Brand words leave the name match in equivalent mode.
+ * the chains the EAN did not find (exact mode, where the brand must match too) or always
+ * (equivalent mode, where another brand is welcome and brand words leave the name match).
  */
 export async function fallbackOffers(
   db: D1Database,
@@ -179,8 +179,14 @@ export async function fallbackOffers(
 
   const byName = mode === 'equivalent' ? targets : targets.filter((c) => !out[c]?.length);
   if (byName.length) {
-    const brandWords = mode === 'equivalent' ? tokens(wanted.brand ?? '') : [];
-    const patterns = likePatterns(wanted.name, MAX_LIKE_WORDS, brandWords);
+    const brandWords = tokens(wanted.brand ?? '').filter((w) => w.length >= 3);
+    const patterns = likePatterns(wanted.name, MAX_LIKE_WORDS, mode === 'equivalent' ? brandWords : []);
+    // Exact mode also needs the brand (in the name or the brand column), so a common
+    // product ("leche") does not fill the row limit with other brands.
+    if (mode === 'exact' && brandWords.length) {
+      const brand = wordPattern(brandWords[0]!);
+      if (!patterns.includes(brand)) patterns.push(brand);
+    }
     if (patterns.length) take(await huntRows(db, byName, source, (p) => wordsClause(p, patterns)));
   }
   return out;
@@ -234,7 +240,9 @@ export async function catalogueSearch(db: D1Database, q: string, source: Catalog
   }
   const products = [...byEan.values()];
   for (const pr of products) pr.offers.sort((a, b) => a.priceCents - b.priceCents);
-  // Products with prices first, then by name.
-  products.sort((a, b) => Number(b.offers.length > 0) - Number(a.offers.length > 0) || a.name.localeCompare(b.name, 'es'));
+  // Products with prices first, then by name, then the cheapest.
+  const cheapest = (p: Product) => p.offers[0]?.priceCents ?? Number.POSITIVE_INFINITY;
+  products.sort((a, b) => Number(b.offers.length > 0) - Number(a.offers.length > 0)
+    || a.name.localeCompare(b.name, 'es') || cheapest(a) - cheapest(b));
   return products;
 }

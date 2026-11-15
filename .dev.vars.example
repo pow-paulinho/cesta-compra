@@ -1,0 +1,5 @@
+# Local secrets for `wrangler dev`. Copy this file to .dev.vars (git-ignored) and change the value.
+# LIVE_KEY unlocks live supermarket search: the web app sends it in the x-live-key header
+# (Ajustes > clave). Without it, chains answer from Open Prices only.
+# In production set it as a secret instead: npx wrangler secret put LIVE_KEY
+LIVE_KEY=cambia-esto

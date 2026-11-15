@@ -13,7 +13,7 @@
  * A chain that fails answers 'error' or 'blocked'; the stream always reaches 'done'.
  */
 import { CHAINS } from '../shared/chains';
-import { normText, pickBest, rankCandidates, tokens } from '../shared/equiv';
+import { OWN_BRANDS, normText, pickBest, rankCandidates, tokens } from '../shared/equiv';
 import { CHAIN_IDS, type Candidate, type ChainId, type HuntEvent, type HuntMode, type Offer, type WantedProduct } from '../shared/types';
 import { liveAccess, lockedReason, type LiveKeyEnv } from './auth';
 import { failure, fallbackReason, json, liveAdapter, runAdapter, type LiveDeps } from './common';
@@ -95,10 +95,16 @@ export function stripSize(name: string): string {
   return name.replace(SIZE_IN_NAME, ' ').replace(/\s+[-,/]\s*$/, '').replace(/\s+/g, ' ').trim();
 }
 
+/** Single-word own brands ("Hacendado", "Milbona"): another chain's label is no help in a search. */
+const OWN_BRAND_WORDS = new Set(
+  Object.values(OWN_BRANDS).flat().map(normText).filter((w) => w && !w.includes(' ')),
+);
+
 /**
  * What a chain is asked for.
  * exact: the brand (unless the name already has it) and the name, without the size.
- * equivalent: the name's own words (accents kept) minus stop words, sizes and brand words.
+ * equivalent: the name without the size, without the brand's words and without single-word
+ * own brands, accents kept; words like "sin" stay ("leche sin lactosa"), dangling ones go.
  */
 export function huntQuery(product: WantedProduct, mode: HuntMode): string {
   const name = stripSize(product.name) || product.name.trim();
@@ -110,8 +116,12 @@ export function huntQuery(product: WantedProduct, mode: HuntMode): string {
   const brandWords = new Set(tokens(product.brand ?? ''));
   const words = name.split(/\s+/).filter((w) => {
     const t = tokens(w);
-    return t.length > 0 && !t.every((x) => brandWords.has(x));
+    if (!t.length) return normText(w) !== '';
+    return !t.every((x) => brandWords.has(x) || OWN_BRAND_WORDS.has(x));
   });
+  // No stop word left hanging at either end ("Zumo de" from "Zumo de Don Simon").
+  while (words.length && !tokens(words[0]!).length) words.shift();
+  while (words.length && !tokens(words[words.length - 1]!).length) words.pop();
   const q = words.join(' ').trim();
   return (q || name).slice(0, 80).trim();
 }
@@ -191,7 +201,7 @@ export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, 
       }
       const { candidates, pick } = choose(product, offers, mode, qty);
       return candidates.length
-        ? { status: 'locked', candidates, pick, reason: `${reason} Mientras, te enseñamos el último precio del catálogo.${demoNote}` }
+        ? { status: 'locked', candidates, pick, reason: `${reason} Mientras, te enseñamos lo que tiene el catálogo de precios.${demoNote}` }
         : { status: 'locked', candidates: [], pick: null, reason };
     });
   }

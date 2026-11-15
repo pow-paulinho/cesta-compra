@@ -177,7 +177,8 @@ export function makePoliteFetch(opts: PoliteFetchOptions = {}): PoliteFetchWithS
           stats.hits++;
           return withHeader(hit, await hit.arrayBuffer(), CACHE_HEADER, 'hit');
         }
-        await hit.body?.cancel().catch(() => undefined);
+        // Not awaited: cancelling one branch of a teed body only settles when the other ends.
+        void hit.body?.cancel().catch(() => undefined);
         await cache.delete(key).catch(() => false);
       }
     }

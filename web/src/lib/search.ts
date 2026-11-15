@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChainStatus, Offer, Product, SearchEvent, SearchSource } from '@shared/types';
 import { CHAINS } from '@shared/chains';
+import { liveHeaders, searchUrl } from './api';
 import { errorMessage, NETWORK_ERROR, readNdjson } from './ndjson';
 import { rememberProducts } from './products';
 
@@ -20,7 +21,10 @@ export interface SearchState {
   error?: string;
 }
 
-/** Sources the server answers for every search: the catalogue, Open Food Facts and the live chains. */
+/**
+ * Sources the server answers for every search: the catalogue, Open Food Facts and the chains
+ * marked live (each answers ok, none, locked, blocked, error, or unavailable when not wired).
+ */
 const EXPECTED: SearchSource[] = ['catalogo', 'openfoodfacts', ...Object.values(CHAINS).filter((c) => c.mode === 'live').map((c) => c.id)];
 
 export function sourceName(s: SearchSource): string {
@@ -60,7 +64,7 @@ const blank = (q: string): SearchState => ({
   products: [],
 });
 
-export function useSearch(q: string, liveKey: string, attempt: number): SearchState {
+export function useSearch(q: string, liveKey: string, demo: boolean, attempt: number): SearchState {
   const [state, setState] = useState<SearchState>(() => blank(q));
   const ctrlRef = useRef<AbortController | null>(null);
 
@@ -72,8 +76,8 @@ export function useSearch(q: string, liveKey: string, attempt: number): SearchSt
     ctrlRef.current = ctrl;
     (async () => {
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
-          headers: liveKey ? { 'x-live-key': liveKey } : {},
+        const res = await fetch(searchUrl(q, demo), {
+          headers: liveHeaders(liveKey),
           signal: ctrl.signal,
         });
         if (!res.ok || !res.body) {
@@ -107,7 +111,7 @@ export function useSearch(q: string, liveKey: string, attempt: number): SearchSt
       }
     })();
     return () => ctrl.abort();
-  }, [q, liveKey, attempt]);
+  }, [q, liveKey, demo, attempt]);
 
   return state;
 }

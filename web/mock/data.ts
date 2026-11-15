@@ -21,19 +21,23 @@ export interface MockProduct {
   details: ProductDetails;
 }
 
-/** Deterministic hash in [0, 1). */
-export function rand(seed: string): number {
+/** FNV-1a, 32 bits. */
+function hash32(seed: string): number {
   let h = 2166136261;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  return ((h >>> 0) % 10000) / 10000;
+  return h >>> 0;
+}
+
+/** Deterministic pseudo-random number in [0, 1). */
+export function rand(seed: string): number {
+  return (hash32(seed) % 10000) / 10000;
 }
 
 function ean13(seed: string): string {
-  let digits = '84' + String(Math.floor(rand(seed) * 1e10)).padStart(10, '0');
-  digits = digits.slice(0, 12);
+  const digits = ('84' + String(hash32(seed)).padStart(10, '0')).slice(0, 12);
   let sum = 0;
   for (let i = 0; i < 12; i++) sum += Number(digits[i]) * (i % 2 ? 3 : 1);
   return digits + ((10 - (sum % 10)) % 10);

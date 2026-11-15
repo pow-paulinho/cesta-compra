@@ -11,12 +11,17 @@
  */
 import type { ChainId, Product, ProductDetails } from '../../shared/types';
 import type { AdapterCtx, ChainAdapter } from './types';
+import { ahorramas } from './ahorramas';
+import { alcampo } from './alcampo';
+import { aldi } from './aldi';
+import { openFoodFacts } from './openfoodfacts';
 
-export const LIVE_ADAPTERS: Partial<Record<ChainId, ChainAdapter>> = {};
+/** Mercadona and BM are not here: their prices only come from APIs their robots.txt closes to bots (see shared/chains.ts). */
+export const LIVE_ADAPTERS: Partial<Record<ChainId, ChainAdapter>> = { alcampo, aldi, ahorramas };
 
 export interface CatalogueProvider {
   search?(query: string, ctx: AdapterCtx): Promise<Product[]>;
   details?(ean: string, ctx: AdapterCtx): Promise<ProductDetails | null>;
 }
 
-export const OFF: CatalogueProvider = {};
+export const OFF: CatalogueProvider = openFoodFacts;

@@ -38,6 +38,14 @@ export function joinNames(names: string[]): string {
   return `${names.slice(0, -1).join(', ')} y ${names[names.length - 1]}`;
 }
 
+/** A product name without its brand, for cards that show the brand on its own line. */
+export function nameWithoutBrand(name: string, brand: string | null): string {
+  if (!brand) return name;
+  const esc = brand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const out = name.replace(new RegExp(`(^|\\s)${esc}(?=\\s|$)`, 'i'), ' ').replace(/\s+/g, ' ').trim();
+  return out.length >= 3 ? out : name;
+}
+
 export function greeting(now = new Date()): string {
   const h = now.getHours();
   if (h >= 6 && h < 14) return '¡Buenos días!';

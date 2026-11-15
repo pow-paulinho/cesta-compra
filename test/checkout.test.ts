@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseCart } from '../src/api';
-import worker, { page, type Env } from '../src/index';
+import worker, { type Env } from '../src/index';
 
 describe('checkout input', () => {
   it('accepts a cart, a cap and a source', () => {
@@ -22,9 +22,9 @@ describe('checkout input', () => {
     expect(((await res.json()) as { error: string }).error).toContain('maxStores');
   });
 
-  it('puts the checkout on the page', () => {
-    expect(page()).toContain('id="go"');
-    const js = page().split('<script>')[1]!.split('</script>')[0]!;
-    expect(() => new Function(js)).not.toThrow();
+  it('only takes POST', async () => {
+    const res = await worker.fetch(new Request('https://x.test/api/checkout'), {} as Env);
+    expect(res.status).toBe(405);
+    expect(res.headers.get('allow')).toBe('POST');
   });
 });

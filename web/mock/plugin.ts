@@ -5,10 +5,14 @@
  *
  * Live chains answer `locked` unless the request carries `x-live-key` equal to
  * the mock key (env MOCK_KEY, default "cambia-esto").
+ *
+ * It follows the Worker's contract (src/live/*): every hunt answers all 8 chains (the ones
+ * left out of `chains` say 'unavailable'), demo mode (`?demo=1` on search, `demo: true` on
+ * hunt) reads demo prices INSTEAD of Open Prices, never mixed, and `qty` feeds the pick.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
-import { CHAIN_IDS, type ChainId, type HuntEvent, type HuntRequest, type Offer, type Product, type SearchEvent, type SearchSource } from '../../src/shared/types';
+import { CHAIN_IDS, type ChainId, type HuntEvent, type HuntRequest, type LiveStatus, type Offer, type Product, type SearchEvent, type SearchSource } from '../../src/shared/types';
 import { CHAINS, chainList } from '../../src/shared/chains';
 import { pickBest, rankCandidates } from '../../src/shared/equiv';
 import { CATALOGUE, hasOpenPrices, isLiveChain, offerAt, rand, searchCatalogue, type MockProduct } from './data';
@@ -58,6 +62,7 @@ const LOCKED_REASON = 'La búsqueda en vivo necesita tu clave. Añádela en Ajus
 function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL, keyOk: boolean) {
   const q = (url.searchParams.get('q') ?? '').trim();
   if (q.length < 2 || q.length > 80) return json(res, 400, { error: 'La búsqueda debe tener entre 2 y 80 caracteres.' });
+  const demo = url.searchParams.get('demo') === '1';
   const found = searchCatalogue(q);
   const now = new Date();
   const jobs: Array<{ at: number; event: () => SearchEvent }> = [];
@@ -66,7 +71,8 @@ function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL, keyOk
 
   add('catalogo', delay(q + 'cat'), () => {
     const products = found
-      .map((p) => toProduct(p, CHAIN_IDS.filter((c) => !isLiveChain(c) && hasOpenPrices(p, c)).map((c) => offerAt(p, c, 'open_prices', now)!).filter(Boolean)))
+      .map((p) => toProduct(p, CHAIN_IDS.filter((c) => !isLiveChain(c) && (demo || hasOpenPrices(p, c)))
+        .map((c) => offerAt(p, c, demo ? 'demo' : 'open_prices', now)).filter((o): o is Offer => !!o)))
       .filter((p) => p.offers.length);
     return { status: products.length ? 'ok' : 'none', products };
   });
@@ -87,7 +93,7 @@ function handleSearch(req: IncomingMessage, res: ServerResponse, url: URL, keyOk
 }
 
 async function handleHunt(req: IncomingMessage, res: ServerResponse, keyOk: boolean) {
-  let body: HuntRequest & { demo?: boolean };
+  let body: HuntRequest;
   try {
     body = JSON.parse(await readBody(req));
   } catch {
@@ -97,14 +103,17 @@ async function handleHunt(req: IncomingMessage, res: ServerResponse, keyOk: bool
   if (!p || typeof p.name !== 'string' || p.name.trim().length < 2 || (body.mode !== 'exact' && body.mode !== 'equivalent')) {
     return json(res, 400, { error: 'Se acepta { product: { name (2-120), brand, sizeText, ean }, mode: "exact" | "equivalent", chains?: ChainId[] }' });
   }
-  const chains: ChainId[] = Array.isArray(body.chains) && body.chains.length ? body.chains.filter((c) => CHAIN_IDS.includes(c)) : [...CHAIN_IDS];
+  const asked: ChainId[] = Array.isArray(body.chains) && body.chains.length ? body.chains.filter((c) => CHAIN_IDS.includes(c)) : [...CHAIN_IDS];
+  const qty = typeof body.qty === 'number' && body.qty >= 1 && body.qty <= 99 ? Math.round(body.qty) : 1;
   const now = new Date();
-  const jobs = chains.map((chain) => {
-    const at = delay(p.name + chain);
+  // Like the Worker, all 8 chains answer.
+  const jobs = CHAIN_IDS.map((chain) => {
+    const at = asked.includes(chain) ? delay(p.name + chain) : 40;
     return {
       at,
       event: (): HuntEvent => {
         const base = { type: 'chain' as const, chain, ms: at };
+        if (!asked.includes(chain)) return { ...base, status: 'unavailable', candidates: [], pick: null, reason: 'No está entre los supers elegidos para esta búsqueda.' };
         if (isLiveChain(chain) && !keyOk) return { ...base, status: 'locked', candidates: [], pick: null, reason: LOCKED_REASON };
         if (chain === 'supercor' && rand(p.name) > 0.75) {
           return { ...base, status: 'unavailable', candidates: [], pick: null, reason: 'Open Prices no ha respondido a tiempo. Vuelve a intentarlo en un rato.' };
@@ -114,16 +123,16 @@ async function handleHunt(req: IncomingMessage, res: ServerResponse, keyOk: bool
           if (isLiveChain(chain)) {
             const o = offerAt(prod, chain, 'live', now);
             if (o) offers.push(o);
-          } else if (hasOpenPrices(prod, chain)) {
-            const o = offerAt(prod, chain, 'open_prices', now);
-            if (o) offers.push(o);
           } else if (body.demo) {
             const o = offerAt(prod, chain, 'demo', now);
+            if (o) offers.push(o);
+          } else if (hasOpenPrices(prod, chain)) {
+            const o = offerAt(prod, chain, 'open_prices', now);
             if (o) offers.push(o);
           }
         }
         const candidates = rankCandidates(p, offers, body.mode).filter((c) => c.score >= 0.3);
-        const pick = pickBest(candidates, body.mode, p, 1);
+        const pick = pickBest(candidates, body.mode, p, qty);
         const reason = isLiveChain(chain) ? undefined : CHAINS[chain].reason;
         return { ...base, status: pick ? 'ok' : 'none', candidates, pick, ...(reason ? { reason } : {}) };
       },
@@ -153,7 +162,9 @@ export function mockApi(opts: { key: string }): Plugin {
           }
           if (url.pathname === '/api/live') {
             await sleep(350);
-            return json(res, 200, { live: keyOk, chains: chainList().map(({ id, name, mode, reason }) => ({ id, name, mode, ...(reason ? { reason } : {}) })) });
+            const access = keyOk ? 'ok' : req.headers['x-live-key'] ? 'wrong' : 'missing';
+            const body: LiveStatus = { live: keyOk, access, chains: chainList().map(({ id, name, mode, reason }) => ({ id, name, mode, ...(reason ? { reason } : {}) })) };
+            return json(res, 200, body);
           }
           return json(res, 404, { error: 'Ruta no encontrada en la API de prueba.' });
         } catch (e) {

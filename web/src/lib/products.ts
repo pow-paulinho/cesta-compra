@@ -3,6 +3,7 @@
  * a URL (#/buscar?p=<key>). Kept for the session in sessionStorage.
  */
 import type { Product, ProductDetails } from '@shared/types';
+import { detailsUrl } from './api';
 import { getState } from './store';
 
 const KEY = 'cesta.v2.products';
@@ -62,7 +63,7 @@ const details = new Map<string, Promise<ProductDetails | null>>();
 export function loadDetails(ean: string): Promise<ProductDetails | null> {
   let p = details.get(ean);
   if (!p) {
-    p = fetch(`/api/details?ean=${encodeURIComponent(ean)}`)
+    p = fetch(detailsUrl(ean))
       .then(async (res) => {
         if (!res.ok) throw new Error(String(res.status));
         const body = (await res.json()) as { details: ProductDetails | null };
