@@ -1,0 +1,81 @@
+{
+  "count": 550,
+  "page": 1,
+  "page_count": 10,
+  "page_size": 10,
+  "skip": 0,
+  "products": [
+    {
+      "brands": "Central Lechera Asturiana",
+      "categories_tags": [
+        "en:dairies",
+        "en:milks-liquid-and-powder",
+        "en:milks",
+        "en:homogenized-milks",
+        "en:pasteurised-products",
+        "en:semi-skimmed-milks",
+        "en:uht-milks",
+        "en:cow-milks"
+      ],
+      "code": "8410297012150",
+      "countries_tags": [
+        "en:andorra",
+        "en:spain"
+      ],
+      "image_front_small_url": "https://images.openfoodfacts.org/images/products/841/029/701/2150/front_en.78.200.jpg",
+      "nova_group": 1,
+      "nutriscore_grade": "b",
+      "product_name": "Leche Semidesnatada",
+      "product_name_es": "Leche Semidesnatada",
+      "quantity": "1l"
+    },
+    {
+      "brands": "MERCADONA",
+      "categories_tags": [
+        "en:dairies",
+        "en:milks-liquid-and-powder",
+        "en:milks",
+        "en:homogenized-milks",
+        "en:pasteurised-products",
+        "en:semi-skimmed-milks",
+        "en:uht-milks",
+        "en:cow-milks"
+      ],
+      "code": "8480000103826",
+      "countries_tags": [
+        "en:spain"
+      ],
+      "image_front_small_url": "https://images.openfoodfacts.org/images/products/848/000/010/3826/front_es.40.200.jpg",
+      "nova_group": 1,
+      "nutriscore_grade": "b",
+      "product_name": "Leche semidesnatada",
+      "product_name_es": "Leche semidesnatada",
+      "quantity": "1 l"
+    },
+    {
+      "brands": "CORPORACION ALIMENTARIA PEÑASANTA.S.A.",
+      "categories_tags": [
+        "en:beverages-and-beverages-preparations",
+        "en:beverages",
+        "en:dairies",
+        "en:dairy-drinks",
+        "en:milks-liquid-and-powder",
+        "en:milks",
+        "en:homogenized-milks",
+        "en:pasteurised-products",
+        "en:semi-skimmed-milks",
+        "en:uht-milks"
+      ],
+      "code": "8410297111150",
+      "countries_tags": [
+        "en:spain"
+      ],
+      "image_front_small_url": "https://images.openfoodfacts.org/images/products/841/029/711/1150/front_es.41.200.jpg",
+      "nova_group": 1,
+      "nutriscore_grade": "b",
+      "product_name": "Leche semidesnatada",
+      "product_name_es": "Leche semidesnatada",
+      "quantity": "1,5 L"
+    }
+  ]
+}

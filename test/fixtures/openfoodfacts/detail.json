@@ -1,0 +1,37 @@
+{
+  "code": "8410297012150",
+  "product": {
+    "allergens_tags": [
+      "en:milk"
+    ],
+    "brands": "Central Lechera Asturiana",
+    "categories_tags": [
+      "en:dairies",
+      "en:milks-liquid-and-powder",
+      "en:milks",
+      "en:homogenized-milks",
+      "en:pasteurised-products",
+      "en:semi-skimmed-milks",
+      "en:uht-milks",
+      "en:cow-milks"
+    ],
+    "code": "8410297012150",
+    "generic_name_es": "Leche UHT semidesnatada",
+    "image_front_small_url": "https://images.openfoodfacts.org/images/products/841/029/701/2150/front_en.78.200.jpg",
+    "image_front_url": "https://images.openfoodfacts.org/images/products/841/029/701/2150/front_en.78.400.jpg",
+    "image_url": "https://images.openfoodfacts.org/images/products/841/029/701/2150/front_en.78.400.jpg",
+    "ingredients_text_es": "Leche semidesnatada",
+    "labels_tags": [
+      "en:fsc",
+      "en:certified-b-corporation",
+      "en:fsc-mix"
+    ],
+    "nova_group": 1,
+    "nutriscore_grade": "b",
+    "product_name": "Leche Semidesnatada",
+    "product_name_es": "Leche Semidesnatada",
+    "quantity": "1l"
+  },
+  "status": 1,
+  "status_verbose": "product found"
+}

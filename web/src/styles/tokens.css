@@ -1,0 +1,71 @@
+:root {
+  --green: #58cc02;
+  --green-shade: #46a302;
+  --blue: #1cb0f6;
+  --blue-shade: #1899d6;
+  --yellow: #ffc800;
+  --yellow-shade: #e0a800;
+  --orange: #ff9600;
+  --red: #ff4b4b;
+  --red-shade: #d93b3b;
+  --purple: #ce82ff;
+  --ink: #3c3c3c;
+  --muted: #6b6b6b; /* #777 on #F7F7F7 is 4.2:1; this keeps AA on soft backgrounds */
+  --line: #e5e5e5;
+  --bg: #ffffff;
+  --soft: #f7f7f7;
+
+  /* Text on coloured fills, with AA contrast. */
+  --green-ink: #2b7a00;
+  --blue-ink: #0b6fa4;
+  --red-ink: #c62828;
+  --orange-ink: #a65f00;
+  --on-accent: #ffffff;
+
+  --green-tint: #eafbdc;
+  --blue-tint: #ddf4ff;
+  --yellow-tint: #fff4cc;
+  --red-tint: #ffe3e3;
+  --purple-tint: #f6e8ff;
+
+  --radius-card: 16px;
+  --radius-btn: 14px;
+  --border: 2px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 150ms;
+  --dur: 200ms;
+  --dur-slow: 280ms;
+
+  --header-h: 60px;
+  --tabbar-h: 68px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.12);
+  --backdrop: rgba(20, 26, 30, 0.45);
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f1f7fb;
+    --muted: #a7b6be;
+    --line: #37464f;
+    --bg: #131f24;
+    --soft: #1b2a31;
+    --green-ink: #8ee04a;
+    --blue-ink: #6fcdfb;
+    --red-ink: #ff8a8a;
+    --orange-ink: #ffb54d;
+    --green-tint: #1d3313;
+    --blue-tint: #11303f;
+    --yellow-tint: #3a3110;
+    --red-tint: #3d1d1f;
+    --purple-tint: #2f2140;
+    --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.5);
+    --backdrop: rgba(0, 0, 0, 0.6);
+    color-scheme: dark;
+  }
+}
