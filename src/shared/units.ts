@@ -21,8 +21,8 @@ export interface Size {
   unit: BaseUnit;
 }
 
-/** Non-breaking space, used between a number and its symbol ("1,23 €", "11 %"). */
-export const NBSP = ' ';
+/** Non-breaking space, used between a number and its symbol ("1,23 EUR", "11 %"). */
+export const NBSP = '\u00a0';
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -102,8 +102,8 @@ function normaliseSizeText(text: string): string {
   return text
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[×*]/g, ' x ')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u00d7*]/g, ' x ')
     .replace(/(\d),(\d)/g, '$1.$2')
     .replace(/\s+/g, ' ')
     .trim();
@@ -244,7 +244,7 @@ function groupThousands(int: string): string {
   return int.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
-/** "1,23 €" with a non-breaking space before the euro sign; "-0,50 €" for negatives. */
+/** "1,23 EUR" (euro sign) with a non-breaking space before the sign; "-0,50 EUR" for negatives. */
 export function formatEuros(cents: number): string {
   if (!Number.isFinite(cents)) return `-${NBSP}€`;
   const rounded = Math.round(Math.abs(cents));
@@ -256,7 +256,7 @@ export function formatEuros(cents: number): string {
 
 const UNIT_LABEL: Record<PriceUnit, string> = { kg: 'kg', l: 'L', ud: 'ud' };
 
-/** "0,89 €/L", "4,04 €/kg", "0,25 €/ud". */
+/** "0,89 EUR/L", "4,04 EUR/kg", "0,25 EUR/ud" (euro sign, non-breaking space). */
 export function formatUnitPrice(cents: number, unit: PriceUnit): string {
   return `${formatEuros(cents)}/${UNIT_LABEL[unit]}`;
 }
@@ -268,8 +268,8 @@ export function formatAmount(amount: number, unit: BaseUnit): string {
   return `${formatNumber(amount, 2)} ud`;
 }
 
-/** "6 × 1 L", "500 g", "1,5 kg", "12 ud", "3 × 4 ud". */
+/** "6 x 1 L" (with a multiplication sign), "500 g", "1,5 kg", "12 ud", "3 x 4 ud". */
 export function formatSize(s: Size): string {
   const one = formatAmount(s.amount, s.unit);
-  return s.count > 1 ? `${s.count} × ${one}` : one;
+  return s.count > 1 ? `${s.count} \u00d7 ${one}` : one;
 }
