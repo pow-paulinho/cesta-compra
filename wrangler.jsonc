@@ -7,6 +7,9 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "cesta-compra", "database_id": "f1542297-38bc-433e-a7fd-1885d4b1a8a9", "migrations_dir": "migrations" }
   ],
+  // Wrangler builds the web app itself before every deploy and dev session, so a deploy that
+  // runs `wrangler deploy` directly (Cloudflare's automatic deploys do) still ships it.
+  "build": { "command": "npm run build", "watch_dir": ["web/src", "src/shared"] },
   // The web app, built by `npm run build` into dist/client. The Worker runs first only for
   // the API and /health; any other path is a file of the app, or index.html (hash routing).
   "assets": {

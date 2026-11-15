@@ -7,8 +7,7 @@
     "build": "vite build --config web/vite.config.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "dev:mock": "MOCK=1 vite --config web/vite.config.ts",
-    "dev": "npm run build && npx --yes wrangler@4 dev",
-    "predeploy": "npm run build",
+    "dev": "npx --yes wrangler@4 dev",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "deploy": "npx --yes wrangler@4 deploy"
