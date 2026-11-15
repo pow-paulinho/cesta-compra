@@ -1,0 +1,121 @@
+/* Plan screen and the status dock (toast + hunt pill), confetti, ticker.
+   Loads after app.css: equal-specificity rules here win. */
+
+/* ------------------------------------------------------------------ dock */
+/* Above the sheet (51) and its backdrop (50), below the confetti (60): a toast
+   raised from inside a sheet («Cesta vaciada · Deshacer») must stay visible. */
+.dock {
+  z-index: 56;
+}
+
+/* On mobile, with a sheet open, the bottom of the screen is the sheet's main
+   button: the dock moves to the top, over the dimmed backdrop. */
+@media (max-width: 767px) {
+  .dock.over-sheet {
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    bottom: auto;
+    flex-direction: column;
+  }
+}
+
+.hunt-pill .txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hunt-ico {
+  flex: none;
+}
+
+.hunt-ico.ok {
+  color: var(--green);
+}
+
+.hunt-ico.partial {
+  color: var(--orange);
+}
+
+.hunt-ico.none {
+  color: color-mix(in srgb, var(--bg) 75%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  .hunt-ico.ok {
+    color: var(--green-shade);
+  }
+
+  .hunt-ico.partial {
+    color: #a65f00;
+  }
+}
+
+/* The toast, with the hunt progress folded in as a second line. */
+.toast .text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.toast-hunt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 750;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.toast-hunt .txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast-hunt .count {
+  font-variant-numeric: tabular-nums;
+}
+
+.toast-hunt .spin {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2.5px solid color-mix(in srgb, var(--bg) 30%, transparent);
+  border-top-color: var(--green);
+  animation: spin 0.8s linear infinite;
+}
+
+.toast button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.toast .toast-close {
+  color: inherit;
+  padding: 0 10px;
+}
+
+/* Keyboard hint for the undo, only where there is a keyboard to press it. */
+.toast .kbd {
+  display: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1.5px solid currentColor;
+  font: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.8;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .toast .kbd {
+    display: inline-block;
+  }
+}
