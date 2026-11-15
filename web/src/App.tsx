@@ -38,7 +38,7 @@ export function App() {
   return (
     <MotionConfig reducedMotion="user">
       <div className="app">
-        <a href="#contenido" className="sr-only" onClick={(e) => {
+        <a href="#contenido" className="sr-only skip-link" onClick={(e) => {
           e.preventDefault();
           document.getElementById('contenido')?.focus();
         }}>
