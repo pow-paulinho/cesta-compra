@@ -7,7 +7,9 @@ import { matchKey } from '../match';
 import { CHAINS } from '../shared/chains';
 import type { ChainId, ChainStatus, Offer, Product } from '../shared/types';
 import { BudgetError, TimeoutError, defaultCache, makePoliteFetch, type PoliteFetchWithStats } from '../sources/live/http';
+import { readPageStates } from '../sources/live/alcampo';
 import { LIVE_ADAPTERS, OFF, type CatalogueProvider } from '../sources/live/index';
+import { isChallengePage } from '../sources/live/sitemap';
 import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter, type PoliteFetch } from '../sources/live/types';
 
 /** Page requests one chain may get per search or hunt (index requests are counted apart). */
@@ -27,10 +29,12 @@ export interface LiveDeps {
   deadlineMs: number;
   /** Waits before a retry (tests pass a fake one); a real timer by default. */
   sleep?(ms: number): Promise<void>;
+  /** Sources that refused us lately (one per isolate); without it nothing is remembered. */
+  blocks?: BlockBook;
 }
 
 export function defaultDeps(): LiveDeps {
-  const cache = defaultCache();
+  const cache = guardedCache(defaultCache());
   return {
     adapters: LIVE_ADAPTERS,
     off: OFF,
@@ -38,7 +42,104 @@ export function defaultDeps(): LiveDeps {
       makePoliteFetch({ cache, namespace, maxRequests: REQUESTS_PER_CHAIN, maxIndexRequests: INDEX_REQUESTS_PER_CHAIN }),
     now: () => new Date(),
     deadlineMs: CHAIN_DEADLINE_MS,
+    blocks: new BlockBook(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Remembering refusals
+// ---------------------------------------------------------------------------
+
+/** How long a source is left alone after a refusal without Retry-After: 429 / 403 or a challenge. */
+export const BLOCK_429_MS = 15 * 60_000;
+export const BLOCK_403_MS = 60 * 60_000;
+/** The longest Retry-After we honour as given. */
+export const BLOCK_MAX_MS = 6 * 3600_000;
+
+/**
+ * The sources (chain ids, "openfoodfacts") that refused us lately, and until when: a 403,
+ * a 429 or a challenge page is remembered for its Retry-After (at most 6 h), or else 15 min
+ * for a 429 and 1 h for the rest. While it lasts, nothing is sent to that source: a cart
+ * hunted item by item asks a refusing site once, not once per item.
+ */
+export class BlockBook {
+  private readonly until = new Map<string, { until: number; status: number }>();
+
+  /** The block on `key` at `now`, or null. Expired blocks are forgotten. */
+  check(key: string, now: number): { until: number; status: number } | null {
+    const b = this.until.get(key);
+    if (!b) return null;
+    if (now >= b.until) {
+      this.until.delete(key);
+      return null;
+    }
+    return b;
+  }
+
+  record(key: string, status: number, now: number, retryAfter: number | null): void {
+    const fallback = status === 429 ? BLOCK_429_MS : BLOCK_403_MS;
+    const ms = retryAfter !== null && retryAfter > 0 ? Math.min(retryAfter, BLOCK_MAX_MS) : fallback;
+    const cur = this.until.get(key);
+    if (!cur || cur.until < now + ms) this.until.set(key, { until: now + ms, status });
+  }
+}
+
+/** A source we leave alone for now, because it refused us lately. Nothing was sent. */
+export class StillBlockedError extends BlockedError {
+  constructor(public readonly what: string, status: number, public readonly waitMs: number) {
+    super(status, `${what}: still blocked (${status}) for ${Math.ceil(waitMs / 1000)} s`);
+  }
+}
+
+const refusalStatus = (res: Response): number | null =>
+  res.status === 403 || res.status === 429 ? res.status : res.headers.get('cf-mitigated') === 'challenge' ? res.status || 403 : null;
+
+// ---------------------------------------------------------------------------
+// What the cache may keep
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a 200 answer may be kept in the cache. An anti-bot challenge or a WAF page served
+ * with status 200 must not be: replayed for 6 to 24 h, it would keep the chain "blocked" long
+ * after the site recovered. Alcampo pages must carry their page state, Open Food Facts answers
+ * must be JSON.
+ */
+export function worthCaching(cacheUrl: string, text: string): boolean {
+  let namespace = '';
+  try {
+    namespace = decodeURIComponent(new URL(cacheUrl).pathname.split('/')[1] ?? '');
+  } catch {
+    namespace = '';
+  }
+  if (namespace === 'alcampo') return readPageStates(text).length > 0;
+  if (isChallengePage(text)) return false;
+  if (namespace === 'openfoodfacts') {
+    try {
+      JSON.parse(text);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The Cache API store, refusing to keep answers that worthCaching turns down. */
+export function guardedCache(cache: Cache | undefined | null): Cache | undefined {
+  if (!cache) return undefined;
+  const guarded = {
+    match: (req: RequestInfo | URL, opts?: CacheQueryOptions) => cache.match(req, opts),
+    delete: (req: RequestInfo | URL, opts?: CacheQueryOptions) => cache.delete(req, opts),
+    async put(req: RequestInfo | URL, res: Response): Promise<void> {
+      const url = req instanceof Request ? req.url : String(req);
+      const text = await res.clone().text();
+      if (!worthCaching(url, text)) {
+        await res.body?.cancel().catch(() => undefined);
+        return;
+      }
+      await cache.put(req, res);
+    },
+  };
+  return guarded as unknown as Cache;
 }
 
 /** The adapter a chain is searched live with, or null when it answers from the catalogue. */
@@ -119,10 +220,14 @@ export function adapterCtx(namespace: string, deps: LiveDeps, signal?: AbortSign
   const meta: CtxMeta = { retryAfterMs: null };
   const guarded: PoliteFetch = async (url, init = {}) => {
     if (signal?.aborted) throw new AbortedError(namespace);
+    const blocked = deps.blocks?.check(namespace, deps.now().getTime());
+    if (blocked) throw new StillBlockedError(namespace, blocked.status, blocked.until - deps.now().getTime());
     const own = init.signal;
     const merged = own && signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([own, signal]) : own ?? signal;
     const res = await fetch(url, merged ? { ...init, signal: merged } : init);
     meta.retryAfterMs = retryAfterMs(res.headers.get('retry-after'), Date.now());
+    const refused = refusalStatus(res);
+    if (refused !== null) deps.blocks?.record(namespace, refused, deps.now().getTime(), meta.retryAfterMs);
     return res;
   };
   return { ctx: { fetch: guarded, now: deps.now() }, fetch, meta };
@@ -179,9 +284,19 @@ const validOffer = (o: unknown): o is Offer => {
  * the adapter's requests are called off: none is sent after that.
  */
 export async function runAdapter(adapter: ChainAdapter, query: string, deps: LiveDeps, signal?: AbortSignal): Promise<Offer[]> {
+  const now = deps.now().getTime();
+  const blocked = deps.blocks?.check(adapter.chain, now);
+  if (blocked) throw new StillBlockedError(adapter.chain, blocked.status, blocked.until - now);
   const controller = childController(signal);
   const { ctx, fetch } = adapterCtx(adapter.chain, deps, controller.signal);
-  const offers = await withDeadline(adapter.search(query, ctx), deps.deadlineMs, adapter.chain, controller);
+  let offers: Offer[];
+  try {
+    offers = await withDeadline(adapter.search(query, ctx), deps.deadlineMs, adapter.chain, controller);
+  } catch (err) {
+    // A challenge page the adapter recognised (status 200) is a refusal too.
+    if (isBlocked(err) && !deps.blocks?.check(adapter.chain, now)) deps.blocks?.record(adapter.chain, httpStatusOf(err) ?? 403, now, null);
+    throw err;
+  }
   const cached = fetch.stats.network === 0 && fetch.stats.hits > 0;
   return (Array.isArray(offers) ? offers : [])
     .filter(validOffer)
@@ -221,6 +336,10 @@ const NETWORK = /network|connection|fetch failed|socket|ECONN|ENOTFOUND|EAI_AGAI
  * only a sentence of ours, at most with the HTTP status. The raw message goes to the log.
  */
 export function failure(err: unknown, label: string): { status: ChainStatus; reason: string } {
+  if (err instanceof StillBlockedError) {
+    const minutes = Math.max(1, Math.ceil(err.waitMs / 60_000));
+    return { status: 'blocked', reason: `${label} ha rechazado nuestras consultas hace poco: esperamos ${minutes} min antes de volver a preguntar.` };
+  }
   if (isBlocked(err)) {
     const s = httpStatusOf(err);
     return { status: 'blocked', reason: `${label} ha rechazado la consulta automática${s ? ` (HTTP ${s})` : ''}: no insistimos.` };
