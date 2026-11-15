@@ -34,8 +34,10 @@ export interface CatalogueRow {
   observed_on: string | null;
 }
 
-/** Most rows one hunt reads, across all chains. */
-export const HUNT_ROW_LIMIT = 160;
+/** Most rows one hunt reads per chain (the newest, then the cheapest). */
+export const HUNT_ROWS_PER_CHAIN = 40;
+/** Most rows one hunt reads in all: a safety net, never smaller than every chain's share. */
+export const HUNT_ROW_LIMIT = HUNT_ROWS_PER_CHAIN * CHAIN_IDS.length;
 /** Most products one catalogue search returns. */
 export const SEARCH_PRODUCT_LIMIT = 30;
 /** Most words a name match ANDs together. */
@@ -138,9 +140,13 @@ async function huntRows(db: D1Database, chains: ChainId[], source: CatalogueSour
   const src = p.add(source);
   const names = p.list(chains.map((c) => CHAINS[c].catalogueName));
   const where = match(p);
-  const sql = `${SELECT_ROWS} FROM prices x JOIN products p ON p.ean = x.ean
-    WHERE x.source = ${src} AND x.chain IN (${names}) AND (${where})
-    ORDER BY x.observed_on DESC, x.price_cents LIMIT ${HUNT_ROW_LIMIT}`;
+  // The limit applies per chain, so chains with older observations still get their rows.
+  const sql = `SELECT ean, name, brand, size, chain, source, price_cents, observed_on FROM (
+      ${SELECT_ROWS}, ROW_NUMBER() OVER (PARTITION BY x.chain ORDER BY x.observed_on DESC, x.price_cents) AS rn
+      FROM prices x JOIN products p ON p.ean = x.ean
+      WHERE x.source = ${src} AND x.chain IN (${names}) AND (${where})
+    ) WHERE rn <= ${HUNT_ROWS_PER_CHAIN}
+    ORDER BY observed_on DESC, price_cents LIMIT ${HUNT_ROW_LIMIT}`;
   const res = await db.prepare(sql).bind(...p.values).all<CatalogueRow>();
   return res.results ?? [];
 }

@@ -255,4 +255,27 @@ describe.skipIf(!sqlite || !fs)('the D1 catalogue as a fallback', () => {
     const r = await searchProducts(db, 'leche', new Date('2026-11-15T00:00:00Z'));
     expect(r.products.map((p) => p.ean)).toEqual(['8410000000001']);
   });
+
+  it('reads candidates per chain in a hunt, so chains with older observations are not starved', async () => {
+    const { db, raw } = d1();
+    const product = raw.prepare('INSERT INTO products (ean, name, brand, size) VALUES (?, ?, ?, ?)');
+    const price = raw.prepare('INSERT INTO prices (ean, chain, source, price_cents, observed_on, place) VALUES (?, ?, ?, ?, ?, NULL)');
+    const chains: Array<[string, string]> = [
+      ['Mercadona', '2026-11-12'], ['Carrefour', '2026-11-11'], ['Lidl', '2026-11-10'], ['BM', '2026-11-09'], ['El Corte Inglés', '2026-10-01'],
+    ];
+    chains.forEach(([chain, day], c) => {
+      for (let i = 0; i < 45; i++) {
+        const ean = String(8200000000000 + c * 100 + i);
+        product.run(ean, `Leche entera ${chain} ${i}`, null, '1 l');
+        price.run(ean, chain, 'open_prices', 90 + i, day);
+      }
+    });
+    const out = await fallbackOffers(db, { name: 'Leche entera', brand: null, sizeText: null, ean: null },
+      ['mercadona', 'carrefour', 'lidl', 'bm', 'supercor'], { mode: 'equivalent' });
+    for (const id of ['mercadona', 'carrefour', 'lidl', 'bm', 'supercor'] as const) {
+      expect(out[id]?.length, id).toBe(40);
+      // The cheapest of the chain's newest rows come first.
+      expect(out[id]![0]!.priceCents).toBe(90);
+    }
+  });
 });
