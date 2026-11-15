@@ -539,3 +539,63 @@ describe('a failing D1 on the older routes', () => {
     }
   });
 });
+
+describe('calling off an adapter', () => {
+  /** An adapter that asks for one page after another through ctx.fetch, as Aldi's loop does. */
+  function looping(chain: ChainId, pages: number) {
+    return fakeAdapter(chain, async (_q, ctx) => {
+      for (let i = 0; i < pages; i++) {
+        const res = await ctx.fetch(`https://shop.test/p/${i}`, { kind: 'detail' });
+        await res.text();
+      }
+      return [offer(chain)];
+    });
+  }
+  function slowNetwork(ms: number) {
+    const sent: Array<{ url: string; signal: AbortSignal | null }> = [];
+    const doFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: String(input), signal: init?.signal ?? null });
+      await later(ms, null);
+      if (init?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      return new Response('<html></html>');
+    }) as typeof fetch;
+    return { sent, doFetch };
+  }
+
+  it('sends no request after the deadline, and cancels the one in flight', async () => {
+    const net = slowNetwork(30);
+    const aldi = looping('aldi', 10);
+    const d = deps({
+      adapters: { aldi: aldi.adapter },
+      deadlineMs: 50,
+      fetchFor: (namespace) => makePoliteFetch({ doFetch: net.doFetch, namespace, spacer: new HostSpacer({ spacingMs: 0 }) }),
+    });
+    const list = await events<SearchEvent>(handleSearch(searchReq('leche', KEY), { DB: fakeDb().db, LIVE_KEY: KEY }, d));
+    expect(list.find((e) => e.type === 'source' && e.source === 'aldi')).toMatchObject({ status: 'error' });
+    const atAnswer = net.sent.length;
+    expect(atAnswer).toBeLessThanOrEqual(2);
+    await later(200, null);
+    expect(net.sent.length).toBe(atAnswer);
+    expect(net.sent.at(-1)!.signal!.aborted).toBe(true);
+  });
+
+  it('stops asking the shops when the client goes away', async () => {
+    const net = slowNetwork(20);
+    const aldi = looping('aldi', 50);
+    const d = deps({
+      adapters: { aldi: aldi.adapter },
+      deadlineMs: 10_000,
+      fetchFor: (namespace) => makePoliteFetch({ doFetch: net.doFetch, namespace, spacer: new HostSpacer({ spacingMs: 0 }) }),
+    });
+    const res = handleSearch(searchReq('leche', KEY), { DB: fakeDb().db, LIVE_KEY: KEY }, d);
+    const reader = res.body!.getReader();
+    await reader.read();
+    await later(50, null);
+    await reader.cancel();
+    await later(60, null);
+    const afterCancel = net.sent.length;
+    await later(200, null);
+    expect(net.sent.length).toBe(afterCancel);
+    expect(afterCancel).toBeLessThan(50);
+  });
+});

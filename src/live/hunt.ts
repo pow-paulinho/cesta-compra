@@ -135,7 +135,14 @@ export function choose(product: WantedProduct, offers: Offer[], mode: HuntMode, 
 const noneReason = (mode: HuntMode, name: string): string =>
   mode === 'exact' ? `No hemos encontrado este producto en ${name}.` : `No hemos encontrado nada equivalente en ${name}.`;
 
-export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, deps: LiveDeps, emit: (e: HuntEvent) => Promise<void>): Promise<void> {
+export async function runHunt(
+  input: HuntInput,
+  request: Request,
+  env: HuntEnv,
+  deps: LiveDeps,
+  emit: (e: HuntEvent) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
   const started = Date.now();
   const ms = () => Date.now() - started;
   const access = liveAccess(env, request);
@@ -183,7 +190,7 @@ export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, 
   for (const id of live) {
     const adapter = liveAdapter(id, deps.adapters)!;
     answer(id, async () => {
-      const { candidates, pick } = choose(product, await runAdapter(adapter, query, deps), mode, qty);
+      const { candidates, pick } = choose(product, await runAdapter(adapter, query, deps, signal), mode, qty);
       return pick
         ? { status: 'ok', candidates, pick }
         : { status: 'none', candidates, pick: null, reason: noneReason(mode, CHAINS[id].name) };
@@ -241,7 +248,7 @@ export async function handleHunt(request: Request, env: HuntEnv, deps: LiveDeps,
   const parsed = parseHunt(body);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   const stream = ndjsonStream(
-    (emit) => runHunt(parsed.value, request, env, deps, emit),
+    (emit, signal) => runHunt(parsed.value, request, env, deps, emit, signal),
     (err) => console.error('hunt stream failed:', err instanceof Error ? err.message : String(err)),
   );
   waitUntil?.(stream.done);

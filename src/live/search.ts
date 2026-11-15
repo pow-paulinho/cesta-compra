@@ -14,7 +14,7 @@
 import { CHAINS } from '../shared/chains';
 import { CHAIN_IDS, type SearchEvent } from '../shared/types';
 import { liveAccess, lockedReason, type LiveKeyEnv } from './auth';
-import { adapterCtx, dedupeProducts, failure, fallbackReason, groupProducts, json, liveAdapter, runAdapter, withDeadline, type LiveDeps } from './common';
+import { adapterCtx, childController, dedupeProducts, failure, fallbackReason, groupProducts, json, liveAdapter, runAdapter, withDeadline, type LiveDeps } from './common';
 import { catalogueSearch } from './fallback';
 import { ndjsonStream } from './ndjson';
 
@@ -42,7 +42,7 @@ export function handleSearch(request: Request, env: SearchEnv, deps: LiveDeps, w
   const started = Date.now();
   const ms = () => Date.now() - started;
 
-  const stream = ndjsonStream(async (emit) => {
+  const stream = ndjsonStream(async (emit, signal) => {
     const tasks: Array<Promise<void>> = [];
 
     for (const id of CHAIN_IDS) {
@@ -62,7 +62,7 @@ export function handleSearch(request: Request, env: SearchEnv, deps: LiveDeps, w
       tasks.push((async () => {
         let event: SearchEvent;
         try {
-          const products = groupProducts(await runAdapter(adapter, q, deps));
+          const products = groupProducts(await runAdapter(adapter, q, deps, signal));
           event = { type: 'source', source: id, status: products.length ? 'ok' : 'none', products, ms: ms() };
         } catch (err) {
           event = { type: 'source', source: id, products: [], ...failure(err, name), ms: ms() };
@@ -77,8 +77,9 @@ export function handleSearch(request: Request, env: SearchEnv, deps: LiveDeps, w
       tasks.push((async () => {
         let event: SearchEvent;
         try {
-          const { ctx } = adapterCtx('openfoodfacts', deps);
-          const products = dedupeProducts(await withDeadline(search(q, ctx), deps.deadlineMs, 'openfoodfacts'));
+          const controller = childController(signal);
+          const { ctx } = adapterCtx('openfoodfacts', deps, controller.signal);
+          const products = dedupeProducts(await withDeadline(search(q, ctx), deps.deadlineMs, 'openfoodfacts', controller));
           event = { type: 'source', source: 'openfoodfacts', status: products.length ? 'ok' : 'none', products, ms: ms() };
         } catch (err) {
           event = { type: 'source', source: 'openfoodfacts', products: [], ...failure(err, 'Open Food Facts'), ms: ms() };

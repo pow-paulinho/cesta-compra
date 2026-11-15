@@ -1,7 +1,8 @@
 /**
  * Newline-delimited JSON streaming: one JSON value per line, each line written (and so
  * sent) as soon as it is ready. The response is returned at once; the work keeps running
- * while the body streams, and a client that goes away only stops the writing.
+ * while the body streams. A client that goes away stops the writing and aborts the signal
+ * the work receives, so the routes call off requests to the shops nobody will read.
  */
 export const NDJSON_TYPE = 'application/x-ndjson; charset=utf-8';
 
@@ -18,12 +19,19 @@ export function ndjsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-export function ndjsonStream(run: (emit: Emit) => Promise<void>, onError?: (err: unknown) => void): NdjsonStream {
+export function ndjsonStream(run: (emit: Emit, signal: AbortSignal) => Promise<void>, onError?: (err: unknown) => void): NdjsonStream {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
+  const gone = new AbortController();
   let open = true;
   let chain = Promise.resolve();
+  const lost = () => {
+    open = false;
+    if (!gone.signal.aborted) gone.abort(new Error('client went away'));
+  };
+  // The readable side cancelled (the client disconnected) errors the writer at once.
+  writer.closed.catch(lost);
 
   // Writes are chained so lines never interleave, whatever the callers do.
   const emit: Emit = (value) => {
@@ -33,7 +41,7 @@ export function ndjsonStream(run: (emit: Emit) => Promise<void>, onError?: (err:
       try {
         await writer.write(line);
       } catch {
-        open = false;
+        lost();
       }
     });
     return chain;
@@ -41,7 +49,7 @@ export function ndjsonStream(run: (emit: Emit) => Promise<void>, onError?: (err:
 
   const done = (async () => {
     try {
-      await run(emit);
+      await run(emit, gone.signal);
     } catch (err) {
       onError?.(err);
     } finally {

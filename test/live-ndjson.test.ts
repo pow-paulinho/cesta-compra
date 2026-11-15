@@ -71,4 +71,24 @@ describe('NDJSON streaming', () => {
     await response.body!.cancel();
     await expect(done).resolves.toBeUndefined();
   });
+
+  it('aborts the signal the work receives when the client goes away', async () => {
+    let seen: AbortSignal | null = null;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { response, done } = ndjsonStream(async (emit, signal) => {
+      seen = signal;
+      await emit({ n: 1 });
+      await gate;
+      await emit({ n: 2 });
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+    expect(seen!.aborted).toBe(false);
+    await reader.cancel();
+    await later(5, null);
+    expect(seen!.aborted).toBe(true);
+    release();
+    await done;
+  });
 });

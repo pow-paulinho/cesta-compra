@@ -18,8 +18,9 @@ export async function handleDetails(request: Request, deps: LiveDeps): Promise<R
   const off = deps.off;
   if (!off.details) return json({ details: null });
   try {
-    const { ctx } = adapterCtx('openfoodfacts', deps);
-    const details = await withDeadline(off.details.call(off, ean, ctx), deps.deadlineMs, 'openfoodfacts');
+    const controller = new AbortController();
+    const { ctx } = adapterCtx('openfoodfacts', deps, controller.signal);
+    const details = await withDeadline(off.details.call(off, ean, ctx), deps.deadlineMs, 'openfoodfacts', controller);
     return json({ details: details ?? null }, 200, details ? { 'cache-control': `public, max-age=${DETAILS_MAX_AGE_S}` } : {});
   } catch (err) {
     return json({ details: null, error: failure(err, 'Open Food Facts').reason }, 502);

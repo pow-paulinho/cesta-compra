@@ -8,7 +8,7 @@ import { CHAINS } from '../shared/chains';
 import type { ChainId, ChainStatus, Offer, Product } from '../shared/types';
 import { BudgetError, TimeoutError, defaultCache, makePoliteFetch, type PoliteFetchWithStats } from '../sources/live/http';
 import { LIVE_ADAPTERS, OFF, type CatalogueProvider } from '../sources/live/index';
-import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter } from '../sources/live/types';
+import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter, type PoliteFetch } from '../sources/live/types';
 
 /** Page requests one chain may get per search or hunt (index requests are counted apart). */
 export const REQUESTS_PER_CHAIN = 4;
@@ -58,18 +58,55 @@ export class DeadlineError extends Error {
   }
 }
 
-export function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+/** The work was called off (deadline passed, or the client went away) before this request. */
+export class AbortedError extends Error {
+  constructor(what: string) {
+    super(`${what}: called off`);
+    this.name = 'AbortError';
+  }
+}
+
+/**
+ * `work`, or DeadlineError after `ms`. When `controller` is given it is aborted at the
+ * deadline, so the adapter behind `work` stops at its next request instead of running on.
+ */
+export function withDeadline<T>(work: Promise<T>, ms: number, what: string, controller?: AbortController): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new DeadlineError(what, ms)), ms);
+    timer = setTimeout(() => {
+      const err = new DeadlineError(what, ms);
+      controller?.abort(err);
+      reject(err);
+    }, ms);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
-/** A context for one adapter call, and the fetch behind it (for its cache stats). */
-export function adapterCtx(namespace: string, deps: LiveDeps): { ctx: AdapterCtx; fetch: PoliteFetchWithStats } {
+/** A controller that also aborts when `parent` does (the client went away). */
+export function childController(parent?: AbortSignal): AbortController {
+  const ac = new AbortController();
+  if (parent) {
+    if (parent.aborted) ac.abort(parent.reason);
+    else parent.addEventListener('abort', () => ac.abort(parent.reason), { once: true });
+  }
+  return ac;
+}
+
+/**
+ * A context for one adapter call, and the fetch behind it (for its cache stats). With a
+ * signal, every request carries it (an in-flight one is cancelled when it aborts) and no new
+ * request starts once it has aborted: the adapter's loop ends at its next ctx.fetch.
+ */
+export function adapterCtx(namespace: string, deps: LiveDeps, signal?: AbortSignal): { ctx: AdapterCtx; fetch: PoliteFetchWithStats } {
   const fetch = deps.fetchFor(namespace);
-  return { ctx: { fetch, now: deps.now() }, fetch };
+  if (!signal) return { ctx: { fetch, now: deps.now() }, fetch };
+  const guarded: PoliteFetch = async (url, init = {}) => {
+    if (signal.aborted) throw new AbortedError(namespace);
+    const own = init.signal;
+    const merged = own && typeof AbortSignal.any === 'function' ? AbortSignal.any([own, signal]) : own ?? signal;
+    return fetch(url, { ...init, signal: merged });
+  };
+  return { ctx: { fetch: guarded, now: deps.now() }, fetch };
 }
 
 const validOffer = (o: unknown): o is Offer => {
@@ -81,11 +118,13 @@ const validOffer = (o: unknown): o is Offer => {
 /**
  * Runs one chain's adapter through a fresh polite fetch, under the deadline. Offers come
  * back stamped with the chain and source "live", and flagged cached when every answer
- * came from the cache.
+ * came from the cache. When the deadline passes, or `signal` aborts (the client went away),
+ * the adapter's requests are called off: none is sent after that.
  */
-export async function runAdapter(adapter: ChainAdapter, query: string, deps: LiveDeps): Promise<Offer[]> {
-  const { ctx, fetch } = adapterCtx(adapter.chain, deps);
-  const offers = await withDeadline(adapter.search(query, ctx), deps.deadlineMs, adapter.chain);
+export async function runAdapter(adapter: ChainAdapter, query: string, deps: LiveDeps, signal?: AbortSignal): Promise<Offer[]> {
+  const controller = childController(signal);
+  const { ctx, fetch } = adapterCtx(adapter.chain, deps, controller.signal);
+  const offers = await withDeadline(adapter.search(query, ctx), deps.deadlineMs, adapter.chain, controller);
   const cached = fetch.stats.network === 0 && fetch.stats.hits > 0;
   return (Array.isArray(offers) ? offers : [])
     .filter(validOffer)
