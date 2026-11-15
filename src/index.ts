@@ -1,4 +1,5 @@
 import { checkoutCart, searchProducts } from './api';
+import { KeyThrottle, LIVE_KEY_HEADER, clientId, liveAccess } from './live/auth';
 import { defaultDeps, json, readBodyText, type LiveDeps } from './live/common';
 import { handleDetails, liveStatus } from './live/details';
 import { handleHunt } from './live/hunt';
@@ -118,9 +119,27 @@ async function checkoutBody(request: Request): Promise<unknown | Response> {
   }
 }
 
+/** The routes that read the live key, and the throttle on wrong keys sent to them. */
+const KEY_ROUTES = new Set(['/api/live', '/api/search', '/api/hunt']);
+const keyThrottle = new KeyThrottle();
+const TOO_MANY_WRONG_KEYS = 'Demasiados intentos con una clave que no coincide. Espera unos minutos y revisa la clave en Ajustes.';
+
+/** 429 while this client has sent too many wrong keys lately; counts this one when it is wrong. */
+function throttleKey(request: Request, env: Env, path: string): Response | null {
+  if (!KEY_ROUTES.has(path) || !request.headers.get(LIVE_KEY_HEADER)) return null;
+  const client = clientId(request);
+  const now = Date.now();
+  const wait = keyThrottle.waitMs(client, now);
+  if (wait > 0) return json({ error: TOO_MANY_WRONG_KEYS }, 429, { 'retry-after': String(Math.ceil(wait / 1000)) });
+  if (liveAccess(env, request) === 'wrong') keyThrottle.recordWrong(client, now);
+  return null;
+}
+
 async function route(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   const path = url.pathname;
   const waitUntil = ctx ? (p: Promise<unknown>) => ctx.waitUntil(p) : undefined;
+  const throttled = throttleKey(request, env, path);
+  if (throttled) return throttled;
   if (path === '/api/status') return Response.json(await status(env.DB));
   if (path === '/api/products') return Response.json(await searchProducts(env.DB, url.searchParams.get('q') ?? ''));
   if (path === '/api/checkout') {

@@ -5,7 +5,9 @@
  * unlocks live search when it carries the same value in the `x-live-key` header. Without the
  * secret, live search is off for everyone. Open Food Facts and the D1 catalogue never need it.
  *
- * The key is never logged and never echoed back.
+ * The key is never logged and never echoed back. Guessing it online is slowed down: a client
+ * (cf-connecting-ip) that sends WRONG_KEY_LIMIT wrong keys within WRONG_KEY_WINDOW_MS gets 429
+ * on the routes that read the key until the oldest of those attempts leaves the window.
  */
 import type { LiveAccess } from '../shared/types';
 
@@ -57,3 +59,43 @@ export function lockedReason(access: LiveAccess, chainName: string): string {
   if (access === 'wrong') return `Tu clave no coincide con la del servidor: revísala en Ajustes para buscar en ${chainName} en directo.`;
   return `Para buscar en ${chainName} en directo, pon tu clave en Ajustes.`;
 }
+
+/** Wrong keys one client may send within the window before it has to wait. */
+export const WRONG_KEY_LIMIT = 10;
+export const WRONG_KEY_WINDOW_MS = 15 * 60_000;
+/** Clients remembered at most (the oldest are forgotten first), so the map stays small. */
+const MAX_CLIENTS = 2000;
+
+/** Who is asking, as far as the key throttle is concerned. */
+export function clientId(request: Request): string {
+  return request.headers.get('cf-connecting-ip')?.trim() || 'unknown';
+}
+
+/** Wrong-key attempts per client, per isolate (a personal app needs no more). */
+export class KeyThrottle {
+  private readonly wrong = new Map<string, number[]>();
+
+  constructor(private readonly limit = WRONG_KEY_LIMIT, private readonly windowMs = WRONG_KEY_WINDOW_MS) {}
+
+  private recent(client: string, now: number): number[] {
+    const stamps = (this.wrong.get(client) ?? []).filter((t) => t <= now && now - t < this.windowMs);
+    if (stamps.length) this.wrong.set(client, stamps);
+    else this.wrong.delete(client);
+    return stamps;
+  }
+
+  /** Milliseconds until `client` may send a key again; 0 when it may now. */
+  waitMs(client: string, now: number): number {
+    const stamps = this.recent(client, now);
+    return stamps.length >= this.limit ? stamps[stamps.length - this.limit]! + this.windowMs - now : 0;
+  }
+
+  recordWrong(client: string, now: number): void {
+    const stamps = this.recent(client, now);
+    stamps.push(now);
+    this.wrong.delete(client);
+    this.wrong.set(client, stamps);
+    while (this.wrong.size > MAX_CLIENTS) this.wrong.delete(this.wrong.keys().next().value!);
+  }
+}
+
