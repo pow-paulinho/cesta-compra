@@ -25,6 +25,8 @@ export interface LiveDeps {
   fetchFor(namespace: string): PoliteFetchWithStats;
   now(): Date;
   deadlineMs: number;
+  /** Waits before a retry (tests pass a fake one); a real timer by default. */
+  sleep?(ms: number): Promise<void>;
 }
 
 export function defaultDeps(): LiveDeps {
@@ -92,21 +94,76 @@ export function childController(parent?: AbortSignal): AbortController {
   return ac;
 }
 
+/** What the context saw of the answers, for the caller's retry decision. */
+export interface CtxMeta {
+  /** The last answer's Retry-After, in ms; null when it had none. */
+  retryAfterMs: number | null;
+}
+
+/** A Retry-After header (seconds, or an HTTP date) in ms from `now`; null when absent or unreadable. */
+export function retryAfterMs(value: string | null, now: number): number | null {
+  if (value === null || value.trim() === '') return null;
+  const v = value.trim();
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
+}
+
 /**
  * A context for one adapter call, and the fetch behind it (for its cache stats). With a
  * signal, every request carries it (an in-flight one is cancelled when it aborts) and no new
  * request starts once it has aborted: the adapter's loop ends at its next ctx.fetch.
  */
-export function adapterCtx(namespace: string, deps: LiveDeps, signal?: AbortSignal): { ctx: AdapterCtx; fetch: PoliteFetchWithStats } {
+export function adapterCtx(namespace: string, deps: LiveDeps, signal?: AbortSignal): { ctx: AdapterCtx; fetch: PoliteFetchWithStats; meta: CtxMeta } {
   const fetch = deps.fetchFor(namespace);
-  if (!signal) return { ctx: { fetch, now: deps.now() }, fetch };
+  const meta: CtxMeta = { retryAfterMs: null };
   const guarded: PoliteFetch = async (url, init = {}) => {
-    if (signal.aborted) throw new AbortedError(namespace);
+    if (signal?.aborted) throw new AbortedError(namespace);
     const own = init.signal;
-    const merged = own && typeof AbortSignal.any === 'function' ? AbortSignal.any([own, signal]) : own ?? signal;
-    return fetch(url, { ...init, signal: merged });
+    const merged = own && signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([own, signal]) : own ?? signal;
+    const res = await fetch(url, merged ? { ...init, signal: merged } : init);
+    meta.retryAfterMs = retryAfterMs(res.headers.get('retry-after'), Date.now());
+    return res;
   };
-  return { ctx: { fetch: guarded, now: deps.now() }, fetch };
+  return { ctx: { fetch: guarded, now: deps.now() }, fetch, meta };
+}
+
+/** How long to wait before the one retry of a source that answered 502, 503 or 504. */
+export const RETRY_DELAY_MS = 1500;
+/** A longer Retry-After is not waited for: the source answers "error" at once. */
+export const RETRY_AFTER_MAX_MS = 5000;
+const TRANSIENT = new Set([502, 503, 504]);
+
+/** 502/503/504 carried by an error (its status, or "HTTP 503" in our own messages); null otherwise. */
+export function transientStatus(err: unknown): number | null {
+  if (isBlocked(err)) return null;
+  const s = httpStatusOf(err) ?? Number(/\bHTTP (\d{3})\b/.exec(err instanceof Error ? err.message : '')?.[1] ?? NaN);
+  return TRANSIENT.has(s) ? s : null;
+}
+
+const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * `work`, asked once more after RETRY_DELAY_MS (or a Retry-After of up to 5 s) when it fails
+ * with 502/503/504: a source such as Open Food Facts answers 503 now and then and the same
+ * request works seconds later. Never retried: refusals (403/429), timeouts, other errors, a
+ * longer Retry-After, or work already called off. The retry goes through the same polite
+ * fetch, so per-host spacing and the source's own rate window still apply.
+ */
+export async function retryOnceIfUnavailable<T>(
+  work: () => Promise<T>,
+  opts: { signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; meta?: CtxMeta } = {},
+): Promise<T> {
+  try {
+    return await work();
+  } catch (err) {
+    if (transientStatus(err) === null || opts.signal?.aborted) throw err;
+    const asked = opts.meta?.retryAfterMs ?? null;
+    if (asked !== null && asked > RETRY_AFTER_MAX_MS) throw err;
+    await (opts.sleep ?? realSleep)(Math.max(RETRY_DELAY_MS, asked ?? 0));
+    if (opts.signal?.aborted) throw err;
+    return work();
+  }
 }
 
 const validOffer = (o: unknown): o is Offer => {
@@ -153,6 +210,8 @@ const shortMessage = (err: unknown): string => {
 const HTTP_IN_MESSAGE = /\bHTTP (\d{3})\b/;
 /** Our own messages for an answer that came back but could not be read. */
 const UNREADABLE = /not JSON|without product state|without product URLs|sitemap not found|unparseable|cannot be read/i;
+/** A source's own per-minute window is full (Open Food Facts: 10 searches, 15 reads). */
+const RATE_WINDOW = /a minute reached|per minute|por minuto/i;
 /** Connection-level failures of the runtime's fetch. */
 const NETWORK = /network|connection|fetch failed|socket|ECONN|ENOTFOUND|EAI_AGAIN|dns/i;
 
@@ -184,6 +243,9 @@ export function failure(err: unknown, label: string): { status: ChainStatus; rea
   }
   if (Number.isInteger(status) && status >= 400) {
     return { status: 'error', reason: `${label} ha respondido con un error (HTTP ${status}).` };
+  }
+  if (RATE_WINDOW.test(raw)) {
+    return { status: 'error', reason: `${label} solo admite unas pocas consultas por minuto: espera un minuto y vuelve a probar.` };
   }
   if (UNREADABLE.test(raw)) {
     return { status: 'error', reason: `${label} ha respondido algo que no sabemos leer; puede que haya cambiado su web.` };

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from '../src/index';
 import { failure, type LiveDeps } from '../src/live/common';
@@ -9,6 +10,7 @@ import { handleSearch } from '../src/live/search';
 import { CHAINS } from '../src/shared/chains';
 import type { ChainId, HuntEvent, Offer, Product, SearchEvent } from '../src/shared/types';
 import { CACHE_HEADER, HostSpacer, makePoliteFetch } from '../src/sources/live/http';
+import { createOpenFoodFacts } from '../src/sources/live/openfoodfacts';
 import { BlockedError, SourceError, type AdapterCtx, type ChainAdapter } from '../src/sources/live/types';
 
 const NOW = new Date('2026-11-15T12:00:00Z');
@@ -597,5 +599,80 @@ describe('calling off an adapter', () => {
     await later(200, null);
     expect(net.sent.length).toBe(afterCancel);
     expect(afterCancel).toBeLessThan(50);
+  });
+});
+
+describe('Open Food Facts answering 503 now and then', () => {
+  const UNAVAILABLE = readFileSync(new URL('./fixtures/openfoodfacts/unavailable-503.html', import.meta.url), 'utf8');
+  const unavailable = (headers: Record<string, string> = {}) => () => new Response(UNAVAILABLE, { status: 503, headers: { 'content-type': 'text/html', ...headers } });
+  const found = () => Response.json({ products: [{ code: '8410128796228', product_name: 'Leche entera', brands: 'Pascual', quantity: '1 l' }] });
+  function offRig(answers: Array<() => Response>) {
+    const sent: string[] = [];
+    const sleeps: number[] = [];
+    const doFetch = (async (input: RequestInfo | URL) => {
+      sent.push(String(input));
+      return answers[Math.min(sent.length - 1, answers.length - 1)]!();
+    }) as typeof fetch;
+    const d = deps({
+      off: createOpenFoodFacts(),
+      sleep: async (ms) => { sleeps.push(ms); },
+      fetchFor: (namespace) => makePoliteFetch({ doFetch, namespace, spacer: new HostSpacer({ spacingMs: 0 }) }),
+    });
+    return { d, sent, sleeps };
+  }
+  const offEvent = async (d: LiveDeps) => (await events<SearchEvent>(handleSearch(searchReq('leche'), {}, d)))
+    .find((e) => e.type === 'source' && e.source === 'openfoodfacts') as Extract<SearchEvent, { type: 'source' }>;
+
+  it('search asks once more after 1.5 s and shows the products', async () => {
+    const r = offRig([unavailable(), found]);
+    const e = await offEvent(r.d);
+    expect(e).toMatchObject({ status: 'ok' });
+    expect(e.products.map((p) => p.ean)).toEqual(['8410128796228']);
+    expect(r.sent).toHaveLength(2);
+    expect(r.sent[1]).toBe(r.sent[0]);
+    expect(r.sleeps).toEqual([1500]);
+  });
+
+  it('a second 503 is an error in Spanish, after exactly one retry', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const r = offRig([unavailable()]);
+      const e = await offEvent(r.d);
+      expect(e).toMatchObject({ status: 'error', reason: 'Open Food Facts no está respondiendo bien ahora mismo (HTTP 503). Prueba otra vez en un rato.' });
+      expect(r.sent).toHaveLength(2);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('waits for a short Retry-After, and gives up at once on a long one or a refusal', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const short = offRig([unavailable({ 'retry-after': '3' }), found]);
+      expect((await offEvent(short.d)).status).toBe('ok');
+      expect(short.sleeps).toEqual([3000]);
+      const long = offRig([unavailable({ 'retry-after': '120' }), found]);
+      expect((await offEvent(long.d)).status).toBe('error');
+      expect(long.sent).toHaveLength(1);
+      const refused = offRig([() => new Response('Too Many Requests', { status: 429 }), found]);
+      expect((await offEvent(refused.d)).status).toBe('blocked');
+      expect(refused.sent).toHaveLength(1);
+      expect(refused.sleeps).toEqual([]);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('details are asked once more too', async () => {
+    const r = offRig([unavailable(), () => Response.json({ status: 1, product: { code: '8410128796228', nutriscore_grade: 'b' } })]);
+    const res = await handleDetails(new Request('https://x.test/api/details?ean=8410128796228'), r.d);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { details: { nutriscore: string } }).details.nutriscore).toBe('b');
+    expect(r.sent).toHaveLength(2);
+  });
+
+  it('a full rate window is explained in Spanish', () => {
+    expect(failure(new Error('openfoodfacts: 10 searches a minute reached, try again in a minute'), 'Open Food Facts').reason)
+      .toBe('Open Food Facts solo admite unas pocas consultas por minuto: espera un minuto y vuelve a probar.');
   });
 });

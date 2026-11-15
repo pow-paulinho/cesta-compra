@@ -8,7 +8,7 @@
 import { CHAINS } from '../shared/chains';
 import { CHAIN_IDS, type ChainInfo, type LiveStatus } from '../shared/types';
 import { liveAccess, type LiveAccess, type LiveKeyEnv } from './auth';
-import { adapterCtx, failure, fallbackReason, json, liveAdapter, withDeadline, type LiveDeps } from './common';
+import { adapterCtx, failure, fallbackReason, json, liveAdapter, retryOnceIfUnavailable, withDeadline, type LiveDeps } from './common';
 
 export const DETAILS_MAX_AGE_S = 24 * 3600;
 
@@ -19,8 +19,9 @@ export async function handleDetails(request: Request, deps: LiveDeps): Promise<R
   if (!off.details) return json({ details: null });
   try {
     const controller = new AbortController();
-    const { ctx } = adapterCtx('openfoodfacts', deps, controller.signal);
-    const details = await withDeadline(off.details.call(off, ean, ctx), deps.deadlineMs, 'openfoodfacts', controller);
+    const { ctx, meta } = adapterCtx('openfoodfacts', deps, controller.signal);
+    const once = retryOnceIfUnavailable(() => off.details!.call(off, ean, ctx), { signal: controller.signal, sleep: deps.sleep, meta });
+    const details = await withDeadline(once, deps.deadlineMs, 'openfoodfacts', controller);
     return json({ details: details ?? null }, 200, details ? { 'cache-control': `public, max-age=${DETAILS_MAX_AGE_S}` } : {});
   } catch (err) {
     return json({ details: null, error: failure(err, 'Open Food Facts').reason }, 502);

@@ -14,7 +14,7 @@
 import { CHAINS } from '../shared/chains';
 import { CHAIN_IDS, type SearchEvent } from '../shared/types';
 import { liveAccess, lockedReason, type LiveKeyEnv } from './auth';
-import { adapterCtx, childController, dedupeProducts, failure, fallbackReason, groupProducts, json, liveAdapter, runAdapter, withDeadline, type LiveDeps } from './common';
+import { adapterCtx, childController, dedupeProducts, failure, fallbackReason, groupProducts, json, liveAdapter, retryOnceIfUnavailable, runAdapter, withDeadline, type LiveDeps } from './common';
 import { catalogueSearch } from './fallback';
 import { ndjsonStream } from './ndjson';
 
@@ -78,8 +78,10 @@ export function handleSearch(request: Request, env: SearchEnv, deps: LiveDeps, w
         let event: SearchEvent;
         try {
           const controller = childController(signal);
-          const { ctx } = adapterCtx('openfoodfacts', deps, controller.signal);
-          const products = dedupeProducts(await withDeadline(search(q, ctx), deps.deadlineMs, 'openfoodfacts', controller));
+          const { ctx, meta } = adapterCtx('openfoodfacts', deps, controller.signal);
+          // Open Food Facts answers 503 now and then: one polite retry, inside the deadline.
+          const once = retryOnceIfUnavailable(() => search(q, ctx), { signal: controller.signal, sleep: deps.sleep, meta });
+          const products = dedupeProducts(await withDeadline(once, deps.deadlineMs, 'openfoodfacts', controller));
           event = { type: 'source', source: 'openfoodfacts', status: products.length ? 'ok' : 'none', products, ms: ms() };
         } catch (err) {
           event = { type: 'source', source: 'openfoodfacts', products: [], ...failure(err, 'Open Food Facts'), ms: ms() };
