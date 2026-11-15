@@ -476,44 +476,99 @@ export function acceptable(kind: MatchKind, mode: HuntMode): boolean {
 
 const validOffer = (o: Offer) => Number.isFinite(o.priceCents) && o.priceCents > 0;
 const byId = (a: Offer, b: Offer) => (a.chain < b.chain ? -1 : a.chain > b.chain ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+const normQty = (qty: number | undefined) => Math.max(1, Number.isFinite(qty) ? Math.ceil(qty!) : 1);
+
+/** Most candidates a chain answers with. */
+const MAX_CANDIDATES = 5;
+/** Quantities whose picks rankCandidates always keeps, so a later change of quantity still finds its best pack. */
+const KEEP_FOR_QTY = [1, 24, 6, 12, 2, 3];
 
 /**
- * Scores and sorts a chain's offers for the wanted product, at most 5.
- * Exact mode: weak ones dropped; best kind, then score, then price.
- * Equivalent mode: acceptable ones first, cheapest for one wanted unit first.
+ * Can this candidate be bought on its own merit? Not when the wanted size is
+ * known and the offer's is not (a sizeless "Leche Pascual" for "6 x 1 L"):
+ * its cost cannot be checked, so it is listed for the user to choose but never
+ * picked. A matching EAN is the same product, so it always can.
  */
-export function rankCandidates(wanted: WantedProduct, offers: Offer[], mode: HuntMode): Candidate[] {
-  const size = wantedSize(wanted);
-  const scored = offers.filter(validOffer).map((o) => ({ ...o, ...scoreCandidate(wanted, o) }) as Candidate);
-  const list = mode === 'exact' ? scored.filter((c) => c.kind !== 'weak') : scored;
-  const cost = new Map(list.map((c) => [c, costFor(c, size, 1).cents]));
-  list.sort((a, b) => {
-    if (mode === 'exact') {
-      return KIND_RANK[a.kind] - KIND_RANK[b.kind] || b.score - a.score || a.priceCents - b.priceCents || byId(a, b);
-    }
-    const okA = acceptable(a.kind, mode) ? 0 : 1;
-    const okB = acceptable(b.kind, mode) ? 0 : 1;
-    return okA - okB || cost.get(a)! - cost.get(b)! || b.score - a.score || byId(a, b);
-  });
-  return list.slice(0, 5);
+function pickable(c: Candidate, wanted: WantedProduct, size: Size | null): boolean {
+  if (!validOffer(c)) return false;
+  if (!size || offerSize(c)) return true;
+  const we = eanKey(wanted.ean);
+  return !!we && we === eanKey(c.ean);
 }
 
 /**
- * The offer to buy at one chain.
- * Exact mode: the best exact (then same-brand) match by score, then cost.
- * Equivalent mode: the cheapest acceptable match for the needed amount.
+ * The order picks are made in, best first.
+ * Exact mode: exact before same-brand. Every exact candidate is the wanted
+ * product (perhaps in another pack), so the cheapest for the needed amount
+ * wins; same-brand ones are variants, so the closest wins, then the cheapest.
+ * Equivalent mode: the cheapest for the needed amount, then the closest.
+ */
+function pickOrder(mode: HuntMode, cost: (c: Candidate) => number): (a: Candidate, b: Candidate) => number {
+  const score2 = (c: Candidate) => Math.round(c.score * 100);
+  return (a, b) => {
+    if (mode === 'exact') {
+      return (
+        KIND_RANK[a.kind] - KIND_RANK[b.kind]
+        || (a.kind === 'exact' ? 0 : score2(b) - score2(a))
+        || cost(a) - cost(b)
+        || b.score - a.score
+        || byId(a, b)
+      );
+    }
+    return cost(a) - cost(b) || b.score - a.score || byId(a, b);
+  };
+}
+
+function costMemo(size: Size | null, qty: number): (c: Candidate) => number {
+  const memo = new Map<Candidate, number>();
+  return (c) => {
+    let v = memo.get(c);
+    if (v === undefined) memo.set(c, (v = costFor(c, size, qty).cents));
+    return v;
+  };
+}
+
+/**
+ * Scores and sorts a chain's offers for the wanted product, at most 5, in the
+ * order pickBest would choose them for `qty` (default 1): candidates it can
+ * pick first, then the rest. Exact mode drops weak ones and lists by kind.
+ * The 5 always include the picks for other quantities too (1, 2, 3, 6, 12,
+ * 24), so a 6-pack that is the best buy for six is never cut for being dear
+ * for one.
+ */
+export function rankCandidates(wanted: WantedProduct, offers: Offer[], mode: HuntMode, qty = 1): Candidate[] {
+  const size = wantedSize(wanted);
+  const q = normQty(qty);
+  const scored = offers.filter(validOffer).map((o) => ({ ...o, ...scoreCandidate(wanted, o) }) as Candidate);
+  const list = mode === 'exact' ? scored.filter((c) => c.kind !== 'weak') : scored;
+  const order = pickOrder(mode, costMemo(size, q));
+  const rank = (c: Candidate) => (acceptable(c.kind, mode) && pickable(c, wanted, size) ? 0 : 1);
+  list.sort((a, b) => {
+    if (mode === 'exact') return KIND_RANK[a.kind] - KIND_RANK[b.kind] || rank(a) - rank(b) || order(a, b);
+    return rank(a) - rank(b) || order(a, b);
+  });
+  const keep = new Set<Candidate>();
+  for (const n of [q, ...KEEP_FOR_QTY]) {
+    if (keep.size >= MAX_CANDIDATES) break;
+    const p = pickBest(list, mode, wanted, n);
+    if (p) keep.add(p);
+  }
+  let room = MAX_CANDIDATES - keep.size;
+  return list.filter((c) => keep.has(c) || room-- > 0);
+}
+
+/**
+ * The offer to buy at one chain, for `qty` wanted units.
+ * Exact mode: an exact match (the cheapest for the needed amount), else the
+ * closest same-brand one. Equivalent mode: the cheapest acceptable match for
+ * the needed amount. An offer whose size is unknown while the wanted one is
+ * known is never picked (see pickable).
  */
 export function pickBest(candidates: Candidate[], mode: HuntMode, wanted: WantedProduct, qty: number): Candidate | null {
   const size = wantedSize(wanted);
-  const q = Math.max(1, Number.isFinite(qty) ? qty : 1);
-  const ok = candidates.filter((c) => validOffer(c) && acceptable(c.kind, mode));
+  const ok = candidates.filter((c) => acceptable(c.kind, mode) && pickable(c, wanted, size));
   if (!ok.length) return null;
-  const cost = new Map(ok.map((c) => [c, costFor(c, size, q).cents]));
-  const score2 = (c: Candidate) => Math.round(c.score * 100);
-  ok.sort((a, b) => {
-    if (mode === 'exact') return KIND_RANK[a.kind] - KIND_RANK[b.kind] || score2(b) - score2(a) || cost.get(a)! - cost.get(b)! || byId(a, b);
-    return cost.get(a)! - cost.get(b)! || b.score - a.score || byId(a, b);
-  });
+  ok.sort(pickOrder(mode, costMemo(size, normQty(qty))));
   return ok[0]!;
 }
 

@@ -340,6 +340,44 @@ describe('rankCandidates', () => {
     expect(rankCandidates(pascual, [offer('Leche semidesnatada Pascual', 'Pascual', '1 L', Number.NaN)], 'exact')).toEqual([]);
   });
 
+  // Regression (shared-8): the list was cut to the 5 cheapest for ONE unit, so
+  // the 6-pack that is cheapest for six was gone before pickBest saw it.
+  it('keeps the pick for the quantity, and for other quantities, among the 5', () => {
+    const leche: WantedProduct = { name: 'Leche entera', brand: null, sizeText: '1 L', ean: null };
+    const offers = [90, 95, 99, 105, 110].map((p, i) => offer('Leche entera', `B${i}`, '1 L', p, { id: `b${i}` }));
+    offers.push(offer('Leche entera', 'Auchan', '6 x 1 L', 480, { id: 'six' }));
+    const forSix = rankCandidates(leche, offers, 'equivalent', 6);
+    expect(forSix).toHaveLength(5);
+    expect(forSix[0]!.id).toBe('six');
+    expect(pickBest(forSix, 'equivalent', leche, 6)!.id).toBe('six');
+    // Ranked for one unit (as an older hunt did), the 6-pack is still there for a later qty of 6.
+    const forOne = rankCandidates(leche, offers, 'equivalent');
+    expect(forOne).toHaveLength(5);
+    expect(forOne[0]!.id).toBe('b0');
+    expect(forOne.map((c) => c.id)).toContain('six');
+    expect(pickBest(forOne, 'equivalent', leche, 6)!.id).toBe('six');
+  });
+
+  // Regression (shared-10): a same-brand offer without a size was picked and
+  // costed as one wanted unit, even for a wanted 6-pack.
+  it('lists a same-brand offer without a size but does not pick it when the wanted size is known', () => {
+    const pack: WantedProduct = { name: 'Leche entera Pascual', brand: 'Pascual', sizeText: '6 x 1 L', ean: null };
+    const sizeless = offer('Leche entera Pascual', 'Pascual', null, 125, { id: 'sizeless' });
+    expect(scoreCandidate(pack, sizeless).kind).toBe('same-brand');
+    expect(rankCandidates(pack, [sizeless], 'exact').map((c) => c.id)).toEqual(['sizeless']);
+    expect(pickBest(rankCandidates(pack, [sizeless], 'exact'), 'exact', pack, 1)).toBeNull();
+    const sized = offer('Leche entera Pascual', 'Pascual', '6 x 1 L', 630, { id: 'sized' });
+    const r = rankCandidates(pack, [sizeless, sized], 'exact');
+    expect(r[0]!.id).toBe('sized');
+    expect(pickBest(r, 'exact', pack, 1)!.id).toBe('sized');
+    // Same EAN: the same product, so its size does not need checking.
+    const byEan = offer('Leche entera Pascual', 'Pascual', null, 125, { id: 'ean', ean: '8410128000017' });
+    expect(pickBest(rankCandidates({ ...pack, ean: '8410128000017' }, [byEan], 'exact'), 'exact', { ...pack, ean: '8410128000017' }, 1)!.id).toBe('ean');
+    // Without a wanted size there is nothing to check against.
+    const any: WantedProduct = { ...pack, sizeText: null };
+    expect(pickBest(rankCandidates(any, [sizeless], 'exact'), 'exact', any, 1)!.id).toBe('sizeless');
+  });
+
   it('keeps the offer fields on the candidate', () => {
     const [c] = rankCandidates(pascual, [offer('Leche semidesnatada Pascual', 'Pascual', '1 L', 120, { chain: 'lidl' as ChainId })], 'exact');
     expect(c).toMatchObject({ chain: 'lidl', priceCents: 120, kind: 'exact' });
@@ -365,6 +403,27 @@ describe('pickBest', () => {
     ];
     expect(pickBest(picks, 'exact', pascual, 1)!.name).toBe('single');
     expect(pickBest(picks, 'exact', pascual, 6)!.name).toBe('pack');
+  });
+
+  // Regression (shared-9): exact mode ranked score before cost, and a pack of
+  // the same product scores a little lower (size 'pack'), so it bought six
+  // bricks at 7,50 instead of the 6-pack at 6,30.
+  it('in exact mode buys the same product in the pack that is cheapest for the quantity', () => {
+    const w: WantedProduct = { name: 'Leche entera Pascual', brand: 'Pascual', sizeText: '1 L', ean: null };
+    const r = rankCandidates(w, [
+      offer('Leche entera Pascual', 'Pascual', '1 L', 125, { id: 'one' }),
+      offer('Leche entera Pascual', 'Pascual', '6 x 1 L', 630, { id: 'six' }),
+    ], 'exact');
+    expect(r.map((c) => c.kind)).toEqual(['exact', 'exact']);
+    expect(r[0]!.score).toBeGreaterThan(r[1]!.score);
+    expect(pickBest(r, 'exact', w, 1)!.id).toBe('one');
+    expect(pickBest(r, 'exact', w, 6)!.id).toBe('six');
+    // A same-brand variant is still chosen by closeness first.
+    const variants = [
+      cand(offer('close', null, '1 L', 130), 'same-brand', 0.85),
+      cand(offer('far', null, '1 L', 90), 'same-brand', 0.7),
+    ];
+    expect(pickBest(variants, 'exact', w, 1)!.name).toBe('close');
   });
 
   it('in exact mode falls back to same-brand, never to an equivalent', () => {
