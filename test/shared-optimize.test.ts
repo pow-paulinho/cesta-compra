@@ -101,14 +101,25 @@ describe('optimise', () => {
     expect(r.split.stores).toBe(2);
   });
 
-  it('reports items that no chain prices and gives no saving then', () => {
+  // Regression (shared-7): one item priced nowhere used to null bestSingle and
+  // savingCents, while the split tip still claimed a saving against one store.
+  it('reports items that no chain prices and still compares the chains on the rest', () => {
     const items = [...cart, item('caviar', 1, {})];
     const r = optimise(items);
     expect(r.split.missing).toEqual(['caviar']);
     expect(r.split.totalCents).toBe(180 + 150 + 450);
+    expect(r.bestSingle).toMatchObject({ chain: 'mercadona', totalCents: 240 + 150 + 450, missing: ['caviar'] });
+    expect(r.savingCents).toBe(240 - 180);
+    expect(r.byCap[1].missing).toEqual(['caviar']);
+  });
+
+  it('has no single store to compare when no chain has every priced item', () => {
+    const r = optimise([item('a', 1, { aldi: 100 }), item('b', 1, { lidl: 100 }), item('c', 1, {})]);
     expect(r.bestSingle).toBeNull();
     expect(r.savingCents).toBeNull();
-    expect(r.byCap[1].missing).toEqual(['caviar']);
+    const none = optimise([item('c', 1, {})]);
+    expect(none.bestSingle).toBeNull();
+    expect(none.savingCents).toBeNull();
   });
 
   it('lets the extra-store cost flip the decision', () => {

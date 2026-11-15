@@ -82,6 +82,16 @@ describe('savingTips', () => {
     expect([...savings].sort((a, b) => b - a)).toEqual(savings);
   });
 
+  // Regression (shared-7): with an item priced nowhere, the headline had no
+  // single store to compare with while the split tip claimed a saving.
+  it('claims the same saving as the plan when an item has no price anywhere', () => {
+    const opt = optimise(basket);
+    expect(opt.split.missing).toEqual(['avena']);
+    expect(opt.bestSingle).toMatchObject({ chain: 'mercadona', missing: ['avena'] });
+    expect(opt.savingCents).toBe(220);
+    expect(byId(savingTips(basket, opt, NOW), 'split')!.savingCents).toBe(opt.savingCents);
+  });
+
   it('suggests one more store when the cap holds the saving back', () => {
     const tips = savingTips(basket, optimise(basket, { cap: 1 }), NOW);
     expect(tips[0]).toMatchObject({ id: 'more-stores', savingCents: 220, body: eur('Si pasas también por Aldi y Lidl, ahorras otros 2,20 €.') });

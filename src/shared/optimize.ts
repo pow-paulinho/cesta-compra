@@ -52,12 +52,16 @@ export interface PlanResult {
 export interface Optimisation {
   /** Every chain considered, sorted: full coverage first (fewest missing), then total, then chain id. */
   singles: Array<PlanResult & { chain: ChainId }>;
-  /** The cheapest chain that has every item; null when none has, or the cart is empty. */
+  /**
+   * The cheapest chain that has every item some chain prices (an item priced
+   * nowhere cannot tell chains apart, so it does not stop the comparison; it
+   * is in `missing`); null when no chain has them all, or nothing has a price.
+   */
   bestSingle: (PlanResult & { chain: ChainId }) | null;
   /** The best plan under opts.cap and opts.extraStoreCents. */
   split: PlanResult;
   byCap: { 1: PlanResult; 2: PlanResult; 3: PlanResult; all: PlanResult };
-  /** bestSingle.totalCents - split.totalCents when both cover every item; else null. */
+  /** bestSingle.totalCents - split.totalCents when the split covers every item some chain prices; else null. */
   savingCents: number | null;
 }
 
@@ -197,7 +201,9 @@ export function optimise(items: PlanItem[], opts: OptimiseOptions = {}): Optimis
   const singles = considered
     .map((chain) => ({ chain, ...planFor(rows, [chain]).plan }))
     .sort((a, b) => a.missing.length - b.missing.length || a.totalCents - b.totalCents || cmpId(a.chain, b.chain));
-  const bestSingle = rows.length ? singles.find((s) => s.missing.length === 0) ?? null : null;
+  // Items no considered chain prices are missing from every plan alike.
+  const nowhere = rows.filter((r) => !present.some((c) => r.cells[c])).length;
+  const bestSingle = singles.find((s) => s.stores > 0 && s.missing.length === nowhere) ?? null;
 
   const split = bestUnder(opts.cap);
   return {
@@ -205,6 +211,6 @@ export function optimise(items: PlanItem[], opts: OptimiseOptions = {}): Optimis
     bestSingle,
     split,
     byCap: { 1: bestUnder(1), 2: bestUnder(2), 3: bestUnder(3), all: bestUnder(undefined) },
-    savingCents: bestSingle && split.missing.length === 0 ? bestSingle.totalCents - split.totalCents : null,
+    savingCents: bestSingle && split.missing.length === nowhere ? bestSingle.totalCents - split.totalCents : null,
   };
 }
