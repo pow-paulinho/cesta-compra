@@ -16,7 +16,7 @@ import { CHAINS } from '../shared/chains';
 import { OWN_BRANDS, normText, pickBest, rankCandidates, tokens } from '../shared/equiv';
 import { CHAIN_IDS, type Candidate, type ChainId, type HuntEvent, type HuntMode, type Offer, type WantedProduct } from '../shared/types';
 import { liveAccess, lockedReason, type LiveKeyEnv } from './auth';
-import { failure, fallbackReason, json, liveAdapter, runAdapter, type LiveDeps } from './common';
+import { failure, fallbackReason, json, liveAdapter, readBodyText, runAdapter, type LiveDeps } from './common';
 import { fallbackOffers } from './fallback';
 import { ndjsonStream } from './ndjson';
 
@@ -226,12 +226,15 @@ export async function runHunt(input: HuntInput, request: Request, env: HuntEnv, 
 
 /** Reads the body (at most HUNT_MAX_BYTES), validates it, and streams the hunt. */
 export async function handleHunt(request: Request, env: HuntEnv, deps: LiveDeps, waitUntil?: (p: Promise<unknown>) => void): Promise<Response> {
-  const text = await request.text().catch(() => null);
-  if (text === null) return json({ error: `No hemos podido leer el cuerpo. ${HUNT_ACCEPTS}` }, 400);
-  if (new TextEncoder().encode(text).length > HUNT_MAX_BYTES) return json({ error: `El cuerpo pasa de ${HUNT_MAX_BYTES} bytes. ${HUNT_ACCEPTS}` }, 413);
+  const read = await readBodyText(request, HUNT_MAX_BYTES);
+  if (!read.ok) {
+    return read.why === 'too-large'
+      ? json({ error: `El cuerpo pasa de ${HUNT_MAX_BYTES} bytes. ${HUNT_ACCEPTS}` }, 413)
+      : json({ error: `No hemos podido leer el cuerpo. ${HUNT_ACCEPTS}` }, 400);
+  }
   let body: unknown;
   try {
-    body = JSON.parse(text);
+    body = JSON.parse(read.text);
   } catch {
     return json({ error: `El cuerpo no es JSON. ${HUNT_ACCEPTS}` }, 400);
   }

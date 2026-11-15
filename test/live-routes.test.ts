@@ -463,3 +463,79 @@ describe('failure reasons shown to the user', () => {
     }
   });
 });
+
+/** A body streamed in 16 KB chunks, `total` bytes in all, counting what was pulled. */
+function streamedBody(total: number) {
+  const pulled = { bytes: 0, cancelled: false };
+  const chunk = new Uint8Array(16 * 1024).fill(0x20);
+  const body = new ReadableStream<Uint8Array>({
+    pull(c) {
+      if (pulled.bytes >= total) return c.close();
+      pulled.bytes += chunk.byteLength;
+      c.enqueue(chunk);
+    },
+    cancel() {
+      pulled.cancelled = true;
+    },
+  });
+  return { body, pulled };
+}
+const post = (path: string, body: BodyInit, headers: Record<string, string> = {}) =>
+  new Request(`https://x.test${path}`, { method: 'POST', body, headers, duplex: 'half' } as RequestInit);
+
+describe('request bodies are read only up to their limit', () => {
+  it('/api/hunt refuses a large declared Content-Length before reading anything', async () => {
+    const { body, pulled } = streamedBody(64 * 1024 * 1024);
+    const res = await worker.fetch(post('/api/hunt', body, { 'content-length': String(64 * 1024 * 1024) }), { DB: fakeDb().db } as Env);
+    expect(res.status).toBe(413);
+    expect(pulled.bytes).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it('/api/hunt stops reading a body without Content-Length once it passes 8 KB', async () => {
+    const { body, pulled } = streamedBody(64 * 1024 * 1024);
+    const res = await worker.fetch(post('/api/hunt', body), { DB: fakeDb().db } as Env);
+    expect(res.status).toBe(413);
+    expect(pulled.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect(pulled.cancelled).toBe(true);
+  });
+
+  it('/api/checkout has a limit too, and still answers 400 for JSON it does not accept', async () => {
+    const { body, pulled } = streamedBody(64 * 1024 * 1024);
+    const res = await worker.fetch(post('/api/checkout', body), {} as Env);
+    expect(res.status).toBe(413);
+    expect(pulled.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect((await worker.fetch(post('/api/checkout', 'no es json'), {} as Env)).status).toBe(400);
+  });
+});
+
+describe('a failing D1 on the older routes', () => {
+  const broken = {
+    prepare: () => {
+      throw new Error('D1_ERROR: no such table: prices: SQLITE_ERROR');
+    },
+    batch: async () => {
+      throw new Error('D1_ERROR: no such table: prices: SQLITE_ERROR');
+    },
+  } as unknown as D1Database;
+
+  it('answers JSON with a Spanish error, never the raw message or the runtime error page', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const requests = [
+        new Request('https://x.test/api/status'),
+        new Request('https://x.test/api/products?q=leche'),
+        post('/api/checkout', JSON.stringify({ items: [{ ean: '8076809579346', qty: 1 }], source: 'open_prices' })),
+      ];
+      for (const req of requests) {
+        const res = await worker.fetch(req, { DB: broken } as Env);
+        expect(res.status).toBe(503);
+        expect(res.headers.get('content-type')).toContain('application/json');
+        const body = (await res.json()) as { error: string };
+        expect(body.error).toBe('El catálogo de precios no está disponible ahora mismo. Vuelve a intentarlo en un momento.');
+      }
+      expect(quiet).toHaveBeenCalled();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+});

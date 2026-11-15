@@ -1,5 +1,5 @@
 import { checkoutCart, searchProducts } from './api';
-import { defaultDeps, json, type LiveDeps } from './live/common';
+import { defaultDeps, json, readBodyText, type LiveDeps } from './live/common';
 import { handleDetails, liveStatus } from './live/details';
 import { handleHunt } from './live/hunt';
 import { handleSearch } from './live/search';
@@ -34,14 +34,37 @@ const liveDeps = (): LiveDeps => (deps ??= defaultDeps());
 
 const methodNotAllowed = (allow: string) => json({ error: `Método no permitido: usa ${allow}.` }, 405, { allow });
 
-async function api(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
+/** Largest body /api/checkout reads (60 items of {ean, qty} take about 2 KB). */
+export const CHECKOUT_MAX_BYTES = 8 * 1024;
+
+const SERVER_FAILED = 'El servidor ha fallado. Vuelve a intentarlo en un momento.';
+const CATALOGUE_DOWN = 'El catálogo de precios no está disponible ahora mismo. Vuelve a intentarlo en un momento.';
+const isD1Error = (m: string): boolean => /D1_|SQLITE|no such table|database/i.test(m);
+
+async function checkoutBody(request: Request): Promise<unknown | Response> {
+  const read = await readBodyText(request, CHECKOUT_MAX_BYTES);
+  if (!read.ok) {
+    return read.why === 'too-large'
+      ? json({ error: `El cuerpo pasa de ${CHECKOUT_MAX_BYTES} bytes.` }, 413)
+      : json({ error: 'No hemos podido leer el cuerpo.' }, 400);
+  }
+  try {
+    return JSON.parse(read.text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+async function route(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   const path = url.pathname;
   const waitUntil = ctx ? (p: Promise<unknown>) => ctx.waitUntil(p) : undefined;
   if (path === '/api/status') return Response.json(await status(env.DB));
   if (path === '/api/products') return Response.json(await searchProducts(env.DB, url.searchParams.get('q') ?? ''));
   if (path === '/api/checkout') {
     if (request.method !== 'POST') return methodNotAllowed('POST');
-    const r = await checkoutCart(env.DB, await request.json().catch(() => null));
+    const body = await checkoutBody(request);
+    if (body instanceof Response) return body;
+    const r = await checkoutCart(env.DB, body);
     return r ? Response.json(r) : Response.json({ error: 'items: 1–60 of {ean, qty 1–99}; maxStores 1–7; source demo|open_prices' }, { status: 400 });
   }
   if (path === '/api/search') return request.method === 'GET' ? handleSearch(request, env, liveDeps(), waitUntil) : methodNotAllowed('GET');
@@ -49,6 +72,21 @@ async function api(request: Request, env: Env, url: URL, ctx?: ExecutionContext)
   if (path === '/api/details') return request.method === 'GET' ? handleDetails(request, liveDeps()) : methodNotAllowed('GET');
   if (path === '/api/live') return request.method === 'GET' ? json(liveStatus(env, request, liveDeps())) : methodNotAllowed('GET');
   return json({ error: `No existe ${path}.` }, 404);
+}
+
+/**
+ * The API routes. A failure that escapes a route (a D1 error on /api/status, /api/products
+ * or /api/checkout) answers JSON the web app can read, never the runtime's error page and
+ * never the raw message, which goes to the log.
+ */
+async function api(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
+  try {
+    return await route(request, env, url, ctx);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`${url.pathname} failed: ${message}`);
+    return isD1Error(message) ? json({ error: CATALOGUE_DOWN }, 503) : json({ error: SERVER_FAILED }, 500);
+  }
 }
 
 export default {

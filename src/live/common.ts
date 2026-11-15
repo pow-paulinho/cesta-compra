@@ -189,6 +189,44 @@ export function dedupeProducts(products: Product[], limit = PRODUCTS_PER_SOURCE)
   return out;
 }
 
+/** What reading a request body up to a size gave: its text, or why there is none. */
+export type BodyRead = { ok: true; text: string } | { ok: false; why: 'too-large' | 'unreadable' };
+
+/**
+ * The request body as text, read at most `maxBytes` far: a larger Content-Length is refused
+ * before anything is read, and a body that streams past the limit is cancelled there, so a
+ * huge body never sits in the isolate's memory.
+ */
+export async function readBodyText(request: Request, maxBytes: number): Promise<BodyRead> {
+  const declared = request.headers.get('content-length');
+  if (declared !== null && declared.trim() !== '' && !(Number(declared) <= maxBytes)) return { ok: false, why: 'too-large' };
+  if (!request.body) return { ok: true, text: '' };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return { ok: false, why: 'too-large' };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, why: 'unreadable' };
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(all) };
+}
+
 export function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return Response.json(body, { status, headers: { 'cache-control': 'no-store', ...headers } });
 }
