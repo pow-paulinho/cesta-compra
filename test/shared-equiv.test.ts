@@ -166,6 +166,80 @@ describe('scoreCandidate', () => {
     }
   });
 
+  // Regression (shared-2): "sin" and "con" were stop words, so "sin gas" and
+  // "con gas" read the same and exact mode bought the cheaper wrong one.
+  it('tells "sin X" from "con X"', () => {
+    const sinGas: WantedProduct = { name: 'Agua mineral sin gas', brand: 'Font Vella', sizeText: '1,5 L', ean: null };
+    expect(scoreCandidate(sinGas, offer('Agua mineral con gas Font Vella', 'Font Vella', '1,5 L')).kind).toBe('weak');
+    expect(scoreCandidate(sinGas, offer('Agua mineral sin gas Font Vella', 'Font Vella', '1,5 L')).kind).toBe('exact');
+    const want = (name: string): WantedProduct => ({ name, brand: null, sizeText: '1 L', ean: null });
+    expect(scoreCandidate(want('Mantequilla sin sal'), offer('Mantequilla con sal', null, '1 L')).kind).toBe('weak');
+    expect(scoreCandidate(want('Cerveza sin alcohol'), offer('Cerveza con alcohol', null, '1 L')).kind).toBe('weak');
+    expect(scoreCandidate(want('Leche entera sin lactosa'), offer('Leche entera con lactosa', null, '1 L')).kind).toBe('weak');
+    expect(scoreCandidate(want('Aceitunas verdes'), offer('Aceitunas verdes sin hueso', 'X', '1 L')).kind).toBe('weak');
+    // Spellings of the same thing still match.
+    expect(scoreCandidate(want('Leche entera sin lactosa'), offer('Leche entera s/lactosa Hacendado', 'Hacendado', '1 L')).kind).toBe('exact');
+    expect(scoreCandidate(want('Leche entera sin lactosa'), offer('Leche entera 0% lactosa', 'X', '1 L')).kind).toBe('exact');
+    // Plain mineral water is still water: only "con gas" marks the variant.
+    expect(scoreCandidate(want('Agua mineral natural'), offer('Agua mineral natural sin gas', 'Bezoya', '1 L')).kind).toBe('equivalent');
+    expect(scoreCandidate(want('Tomate frito'), offer('Tomate frito sin conservantes', 'Orlando', '1 L')).kind).toBe('equivalent');
+    const picks = rankCandidates(sinGas, [
+      offer('Agua mineral sin gas Font Vella', 'Font Vella', '1,5 L', 70, { id: 'singas' }),
+      offer('Agua mineral con gas Font Vella', 'Font Vella', '1,5 L', 60, { id: 'congas' }),
+    ], 'exact');
+    expect(pickBest(picks, 'exact', sinGas, 1)!.id).toBe('singas');
+  });
+
+  // Regression (shared-3): "0,0" and percentages were dropped as size tokens.
+  it('tells an alcohol-free "0,0" and different percentages apart', () => {
+    const estrella: WantedProduct = { name: 'Cerveza Estrella Galicia', brand: 'Estrella Galicia', sizeText: '33 cl', ean: null };
+    expect(scoreCandidate(estrella, offer('Cerveza Estrella Galicia 0,0', 'Estrella Galicia', '33 cl')).kind).toBe('weak');
+    const picks = rankCandidates(estrella, [
+      offer('Cerveza Estrella Galicia', 'Estrella Galicia', '33 cl', 80, { id: 'normal' }),
+      offer('Cerveza Estrella Galicia 0,0', 'Estrella Galicia', '33 cl', 75, { id: 'cero' }),
+    ], 'exact');
+    expect(pickBest(picks, 'exact', estrella, 1)!.id).toBe('normal');
+    const want = (name: string): WantedProduct => ({ name, brand: null, sizeText: '100 g', ean: null });
+    expect(scoreCandidate(want('Cerveza rubia'), offer('Cerveza rubia 0,0', null, '100 g')).kind).toBe('weak');
+    expect(scoreCandidate(want('Yogur natural'), offer('Yogur natural 0%', null, '100 g')).kind).toBe('weak');
+    expect(scoreCandidate(want('Chocolate negro 70%'), offer('Chocolate negro 85%', null, '100 g')).kind).toBe('weak');
+    // The same share, or "0,0" for "sin alcohol", still matches.
+    expect(scoreCandidate(want('Chocolate negro 70%'), offer('Chocolate negro 70% cacao', 'Lindt', '100 g')).kind).toBe('equivalent');
+    expect(scoreCandidate(want('Cerveza sin alcohol'), offer('Cerveza 0,0', 'Mahou', '100 g')).kind).toBe('exact');
+    expect(scoreCandidate(want('Yogur natural 0%'), offer('Yogur natural 0% M.G.', 'X', '100 g')).kind).toBe('exact');
+    expect(scoreCandidate(want('Leche entera'), offer('Leche entera 3,6% MG', 'X', '100 g')).kind).toBe('equivalent');
+  });
+
+  // Regression (shared-4): missing variant words, a loose prefix rule and brand
+  // phrases that swallowed variant words.
+  it('keeps virgen extra, con gas, azucarado, en polvo and lookalike words apart', () => {
+    const aove: WantedProduct = { name: 'Aceite de oliva virgen extra', brand: null, sizeText: '1 L', ean: null };
+    expect(scoreCandidate(aove, offer('Aceite de oliva virgen', 'Auchan', '1 L')).kind).toBe('weak');
+    expect(scoreCandidate({ ...aove, brand: 'Carbonell' }, offer('Aceite de oliva virgen Carbonell', 'Carbonell', '1 L')).kind).toBe('weak');
+    expect(scoreCandidate(aove, offer('AOVE Hacendado', 'Hacendado', '1 L')).kind).toBe('exact');
+    const picks = rankCandidates(aove, [
+      offer('Aceite de oliva virgen extra', 'Carbonell', '1 L', 899, { id: 'aove' }),
+      offer('Aceite de oliva virgen', 'Auchan', '1 L', 699, { id: 'aov' }),
+    ], 'equivalent');
+    expect(pickBest(picks, 'equivalent', aove, 1)!.id).toBe('aove');
+    const want = (name: string, sizeText: string | null = '250 g'): WantedProduct => ({ name, brand: null, sizeText, ean: null });
+    expect(scoreCandidate(want('Agua mineral natural'), offer('Agua mineral natural con gas', 'X', '250 g')).kind).toBe('weak');
+    expect(scoreCandidate(want('Yogur natural'), offer('Yogur natural azucarado', 'X', '250 g')).kind).toBe('weak');
+    expect(scoreCandidate(want('Leche entera', null), offer('Leche entera en polvo', 'X', '1 kg')).kind).toBe('weak');
+    expect(scoreCandidate(want('Galletas María'), offer('Galletas María con chocolate', 'X', '250 g')).kind).toBe('weak');
+    expect(scoreCandidate(want('Salmón'), offer('Salmonetes', 'X', '250 g')).kind).toBe('weak');
+    expect(scoreCandidate(want('Limones', null), offer('Limonada', null, '1 L')).kind).toBe('weak');
+    expect(scoreCandidate(want('Naranjas', null), offer('Naranjada', null, '1 L')).kind).toBe('weak');
+    expect(scoreCandidate(want('Leche entera', null), offer('La Lechera leche condensada', 'Nestlé', '1 L')).kind).toBe('weak');
+    // A variant inside a brand phrase or a brand field still counts.
+    expect(scoreCandidate(want('Leche entera', '1 L'), offer('Leche entera Carrefour Bio', 'Carrefour Bio', '1 L')).kind).toBe('weak');
+    const puleva: WantedProduct = { name: 'Leche entera', brand: 'Puleva', sizeText: '1 L', ean: null };
+    expect(scoreCandidate(puleva, offer('Leche entera', 'Puleva Sin Lactosa', '1 L')).kind).toBe('weak');
+    // Plurals, one-letter spellings and cut-off words still match.
+    expect(scoreCandidate(want('Yogur natural'), offer('Yogurt natural', 'X', '250 g')).kind).not.toBe('weak');
+    expect(scoreCandidate(want('Leche semidesnatada', '1 L'), offer('Leche semidesn. Pascual', 'Pascual', '1 L')).kind).not.toBe('weak');
+  });
+
   it('copes with empty names', () => {
     const r = scoreCandidate({ name: '', brand: null, sizeText: null, ean: null }, offer('', null, null));
     expect(r.kind).toBe('weak');
