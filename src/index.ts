@@ -4,9 +4,14 @@ import { defaultDeps, json, readBodyText, type LiveDeps } from './live/common';
 import { handleDetails, liveStatus } from './live/details';
 import { handleHunt } from './live/hunt';
 import { handleSearch } from './live/search';
+import { CHECKOUT_MAX_BYTES, IMPORT_REQUEST_TIMEOUT_MS } from './limits';
 import { fetchOpenPrices, type FetchPlan, type OpenPrice } from './sources/openprices';
 import { logImport, saveOpenPrices, seedDemo, status } from './store';
 
+/*
+ * This is the Worker's main module: every named export must be a function (or the default
+ * handler), never a constant, or workerd refuses to start. Constants go in ./limits.
+ */
 export interface Env {
   DB: D1Database;
   /** The built web app (dist/client), served by Workers static assets. */
@@ -18,9 +23,6 @@ export interface Env {
 export function health(): { ok: true; app: string } {
   return { ok: true, app: 'cesta-compra' };
 }
-
-/** How long one Open Prices request may take, body included, before the import moves on. */
-export const IMPORT_REQUEST_TIMEOUT_MS = 15_000;
 
 /**
  * A fetch for the importer that never throws: a network error, a timeout (15 s, body
@@ -97,9 +99,6 @@ let deps: LiveDeps | null = null;
 const liveDeps = (): LiveDeps => (deps ??= defaultDeps());
 
 const methodNotAllowed = (allow: string) => json({ error: `Método no permitido: usa ${allow}.` }, 405, { allow });
-
-/** Largest body /api/checkout reads (60 items of {ean, qty} take about 2 KB). */
-export const CHECKOUT_MAX_BYTES = 8 * 1024;
 
 const SERVER_FAILED = 'El servidor ha fallado. Vuelve a intentarlo en un momento.';
 const CATALOGUE_DOWN = 'El catálogo de precios no está disponible ahora mismo. Vuelve a intentarlo en un momento.';
