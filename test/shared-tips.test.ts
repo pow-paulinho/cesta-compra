@@ -179,6 +179,29 @@ describe('savingTips', () => {
     expect(byId(savingTips(past, optimise(past), NOW), 'promo')).toBeUndefined();
   });
 
+  // Regression (shared-13): a yearless promo that ended last December showed as
+  // running, ending in about a year.
+  it('dates a promo without a year from the day it was seen', () => {
+    const seen = [it_('leche', 'Leche', 1, {}, [o('aldi', 'Leche', null, null, 80, { promo: 'Oferta hasta 31/12', observedOn: '2026-12-20' })])];
+    const promo = (on: string) => byId(savingTips(seen, optimise(seen), new Date(`${on}T10:00:00Z`)), 'promo');
+    expect(promo('2026-12-28')!.body).toBe('La oferta de Aldi en leche acaba el 31/12 (en 3 días).');
+    expect(promo('2027-01-02')).toBeUndefined();
+    expect(promo('2027-03-01')).toBeUndefined();
+    // Seen in March, ending in March: over by November, not next March.
+    const spring = [it_('pan', 'Pan', 1, {}, [o('lidl', 'Pan', null, null, 80, { promo: 'Hasta 15/03', observedOn: '2026-03-01' })])];
+    expect(byId(savingTips(spring, optimise(spring), NOW), 'promo')).toBeUndefined();
+    // Seen in late December, ending in early January: next year's.
+    const winter = [it_('pan', 'Pan', 1, {}, [o('lidl', 'Pan', null, null, 80, { promo: 'Hasta 05/01', observedOn: '2026-12-27' })])];
+    expect(byId(savingTips(winter, optimise(winter), new Date('2027-01-02T10:00:00Z')), 'promo')!.body).toContain('acaba el 05/01 (en 3 días)');
+  });
+
+  it('gives no promo tip for a promo read off a stale price', () => {
+    const items = [it_('leche', 'Leche', 1, {}, [o('carrefour', 'Leche', null, null, 80, { promo: 'Oferta hasta 18/11', source: 'open_prices', observedOn: '2026-09-20' })])];
+    const tips = savingTips(items, optimise(items), NOW);
+    expect(byId(tips, 'promo')).toBeUndefined();
+    expect(byId(tips, 'stale')).toBeDefined();
+  });
+
   it('warns about what a pack leaves over', () => {
     const items = [it_('leche', 'Leche semidesnatada', 2, { sizeText: '1 L' }, [o('aldi', 'Leche semidesnatada', 'Milsani', '6 x 1 L', 474)])];
     expect(byId(savingTips(items, optimise(items), NOW), 'leftover')!.body).toBe(

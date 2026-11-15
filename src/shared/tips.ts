@@ -70,18 +70,36 @@ function ageDays(isoDate: string, now: Date): number | null {
   return Math.floor((today - t) / DAY_MS);
 }
 
-/** End date of a promo text ("Oferta hasta 21/11", "hasta el 3/12/2026"), as days from `now` and "dd/mm". */
-function promoEnd(promo: string, now: Date): { days: number; label: string } | null {
+/** An ISO date (YYYY-MM-DD) as a UTC day, or null when unreadable. */
+function isoDay(isoDate: string | null | undefined): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate ?? '');
+  return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+
+/**
+ * End date of a promo text ("Oferta hasta 21/11", "hasta el 3/12/2026"), as
+ * days from `now` and "dd/mm"; null when it has ended. A date without a year
+ * belongs to the day the promo was seen (`observedOn`, else `now`): the first
+ * such date from then on, unless it was at most half a year before (a promo
+ * text kept after it ended). "Hasta 31/12" seen in December has ended by
+ * January; "hasta 05/01" seen in December is next year's.
+ */
+function promoEnd(promo: string, now: Date, observedOn?: string | null): { days: number; label: string } | null {
   const m = /(?:hasta|acaba|termina|fin)\D{0,12}?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/i.exec(promo);
   if (!m) return null;
   const day = Number(m[1]);
   const month = Number(m[2]);
   if (day < 1 || day > 31 || month < 1 || month > 12) return null;
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  let year = m[3] ? Number(m[3].length === 2 ? `20${m[3]}` : m[3]) : now.getUTCFullYear();
-  let end = Date.UTC(year, month - 1, day);
-  // Without a year, a date long gone means next year ("hasta 05/01" seen in December).
-  if (!m[3] && end < today - 180 * DAY_MS) end = Date.UTC(++year, month - 1, day);
+  let end: number;
+  if (m[3]) {
+    end = Date.UTC(Number(m[3].length === 2 ? `20${m[3]}` : m[3]), month - 1, day);
+  } else {
+    const seen = isoDay(observedOn) ?? today;
+    const year = new Date(seen).getUTCFullYear();
+    end = Date.UTC(year, month - 1, day);
+    if (end < seen - 180 * DAY_MS) end = Date.UTC(year + 1, month - 1, day);
+  }
   const days = Math.round((end - today) / DAY_MS);
   if (days < 0) return null;
   return { days, label: `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}` };
@@ -278,11 +296,7 @@ function demoTip(opt: Optimisation): Tip | null {
 }
 
 function staleTip(opt: Optimisation, now: Date): Tip | null {
-  const old = shownOffers(opt).filter((l) => {
-    if (l.offer.source !== 'open_prices') return false;
-    const age = ageDays(l.offer.observedOn, now);
-    return age !== null && age > STALE_DAYS;
-  });
+  const old = shownOffers(opt).filter((l) => isStale(l.offer, now));
   if (!old.length) return null;
   const n = old.length;
   return {
@@ -293,10 +307,18 @@ function staleTip(opt: Optimisation, now: Date): Tip | null {
   };
 }
 
+/** An Open Prices price seen more than STALE_DAYS ago. */
+function isStale(offer: Offer, now: Date): boolean {
+  if (offer.source !== 'open_prices') return false;
+  const age = ageDays(offer.observedOn, now);
+  return age !== null && age > STALE_DAYS;
+}
+
 function promoTip(items: PlanItem[], opt: Optimisation, now: Date): Tip | null {
   const dated = shownOffers(opt)
-    .filter((l) => l.offer.promo)
-    .map((l) => ({ line: l, end: promoEnd(l.offer.promo!, now) }))
+    // A promo read off an old price may well be over; the stale tip covers those.
+    .filter((l) => l.offer.promo && !isStale(l.offer, now))
+    .map((l) => ({ line: l, end: promoEnd(l.offer.promo!, now, l.offer.observedOn) }))
     .filter((x): x is { line: StopLine & { chain: ChainId }; end: { days: number; label: string } } => x.end !== null)
     .sort((a, b) => a.end.days - b.end.days || (a.line.itemId < b.line.itemId ? -1 : 1));
   const first = dated[0];
