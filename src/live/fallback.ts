@@ -6,10 +6,14 @@
  * CHAINS[id].catalogueName); rows of chains this app does not list (Dia, Consum, Eroski)
  * never become offers.
  *
- * Name matching uses LIKE with the term's own wildcards escaped (as src/api.ts does). Words
- * of four letters or more match with their vowels and n as single-character wildcards, so
- * "lasana" finds "Lasana" spelled with an n-tilde and accents never hide a product (SQLite's
- * lower() folds ASCII only). The ranking in shared/equiv.ts sorts out what that lets through.
+ * Name matching uses LIKE with the term's own wildcards escaped (as src/api.ts does).
+ *   - Hunts (fallbackOffers): words of four letters or more match with their vowels and n as
+ *     single-character wildcards, so "lasana" finds "Lasana" spelled with an n-tilde and
+ *     accents never hide a product (SQLite's lower() folds ASCII only). The ranking in
+ *     shared/equiv.ts sorts out what that lets through, and each chain gets its own rows.
+ *   - Searches (catalogueSearch): the product text is folded in SQL as normText folds the
+ *     query (accents, n-tilde, case), so a word matches only itself, and the products shown
+ *     are chosen priced first before the cut.
  */
 import { matchKey } from '../match';
 import { CHAINS } from '../shared/chains';
@@ -192,31 +196,102 @@ export async function fallbackOffers(
   return out;
 }
 
+/** Accented and special letters SQLite's lower() leaves alone, as normText folds them. */
+const SQL_FOLDS: Array<[string, string]> = [
+  ...[...'áàäâÁÀÄÂ'].map((c): [string, string] => [c, 'a']),
+  ...[...'éèëêÉÈËÊ'].map((c): [string, string] => [c, 'e']),
+  ...[...'íìïîÍÌÏÎ'].map((c): [string, string] => [c, 'i']),
+  ...[...'óòöôÓÒÖÔ'].map((c): [string, string] => [c, 'o']),
+  ...[...'úùüûÚÙÜÛ'].map((c): [string, string] => [c, 'u']),
+  ['ñ', 'n'], ['Ñ', 'n'], ['ç', 'c'], ['Ç', 'c'],
+  ["'", ''], ['\u2019', ''],
+  ...[...'-/.,()"'].map((c): [string, string] => [c, ' ']),
+];
+/** Combining marks of decomposed text (acute, grave, circumflex, tilde, diaeresis). */
+const SQL_COMBINING = [769, 768, 770, 771, 776];
+
+/** SQL for `expr` lowercased, without accents, ñ as n, apostrophes dropped and other punctuation as spaces. */
+export function foldSql(expr: string): string {
+  let e = `lower(${expr})`;
+  for (const [from, to] of SQL_FOLDS) e = `replace(${e}, '${from === "'" ? "''" : from}', '${to}')`;
+  for (const code of SQL_COMBINING) e = `replace(${e}, char(${code}), '')`;
+  return e;
+}
+
+/** "huevos" -> "huevo", "limones" -> "limon": the shorter form also finds the singular. */
+function searchStem(w: string): string {
+  if (w.length > 4 && w.endsWith('es') && /[lnrdzj]/.test(w[w.length - 3]!)) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1);
+  return w;
+}
+
+/**
+ * The words a catalogue search matches, folded as normText folds them: the query's
+ * significant words (at most `max`), or, when it only has short words, those.
+ */
+export function searchWords(q: string, max = 4): string[] {
+  const words = tokens(q).filter((w) => w.length >= 3).slice(0, max);
+  if (words.length) return words.map(searchStem);
+  return normText(q).split(' ').filter((w) => w.length >= 2).slice(0, max);
+}
+
+/** How well a product answers the words: one point per word that starts a word of it. */
+function relevance(product: { name: string; brand: string | null }, words: string[]): number {
+  const text = ` ${normText(`${product.name} ${product.brand ?? ''}`)}`;
+  let score = 0;
+  for (const w of words) if (text.includes(` ${w}`)) score += 1;
+  if (words.length && ` ${normText(product.name)}`.startsWith(` ${words[0]}`)) score += 0.5;
+  return score;
+}
+
+/** Catalogue names of the chains this app shows (rows of other chains never become offers). */
+const OUR_CATALOGUE_NAMES = [...new Set(CHAIN_IDS.flatMap((id) => {
+  const name = CHAINS[id].catalogueName;
+  const bare = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return bare === name ? [name] : [name, bare];
+}))];
+
 /**
  * Product cards from the catalogue for a search: products whose name or brand has every
- * significant word of the query (or whose EAN is the query), each with its prices from the
- * chosen source. Products without such prices still come back, without offers.
+ * significant word of the query (accents, ñ and case folded on both sides; a word of three
+ * letters or more may be a prefix: "huevos" finds "huevo"; shorter ones start a word), or
+ * whose EAN is the query, each with its prices from the chosen source.
+ *
+ * Which products come back is decided before the cut at SEARCH_PRODUCT_LIMIT, in SQL:
+ * products with a price from the chosen source at one of our chains first, then the ones
+ * whose words start with the query's, then the most recently seen, then by name. Products
+ * without such prices only fill the places left.
  */
 export async function catalogueSearch(db: D1Database, q: string, source: CatalogueSource = 'open_prices'): Promise<Product[]> {
   const term = q.trim();
   const p = new Params();
   const src = p.add(source);
+  const names = p.list(OUR_CATALOGUE_NAMES);
   const eans = /^\d{8,14}$/.test(term) ? eanVariants(term) : [];
-  let where: string;
+  const words = eans.length ? [] : searchWords(term);
+  if (!eans.length && !words.length) return [];
+
+  let hits: string;
   if (eans.length) {
-    where = `ean IN (${p.list(eans)})`;
+    hits = `SELECT p.ean AS ean, p.name AS name, 0 AS starts FROM products p WHERE p.ean IN (${p.list(eans)})`;
   } else {
-    const patterns = likePatterns(term, 4);
-    if (!patterns.length) return [];
-    where = patterns
-      .map((pat) => {
-        const ref = p.add(pat);
-        return `(lower(name) LIKE ${ref} ESCAPE '\\' OR lower(coalesce(brand, '')) LIKE ${ref} ESCAPE '\\')`;
-      })
-      .join(' AND ');
+    const like = (pattern: string) => `t LIKE ${p.add(pattern)} ESCAPE '\\'`;
+    const starts = words.map((w) => `(${like(`% ${escapeLike(w)}%`)})`).join(' + ');
+    const all = words.map((w) => like(w.length >= 3 ? `%${escapeLike(w)}%` : `% ${escapeLike(w)}%`)).join(' AND ');
+    hits = `SELECT ean, name, ${starts} AS starts FROM (
+        SELECT p.ean AS ean, p.name AS name, ' ' || ${foldSql("p.name || ' ' || coalesce(p.brand, '')")} AS t FROM products p
+      ) WHERE ${all}`;
   }
-  const sql = `${SELECT_ROWS} FROM products p LEFT JOIN prices x ON x.ean = p.ean AND x.source = ${src}
-    WHERE p.ean IN (SELECT ean FROM products WHERE ${where} LIMIT ${SEARCH_PRODUCT_LIMIT})
+  const sql = `WITH hits AS (${hits}),
+    ranked AS (
+      SELECT h.ean AS ean FROM hits h
+      LEFT JOIN prices x ON x.ean = h.ean AND x.source = ${src} AND x.chain IN (${names})
+      GROUP BY h.ean
+      ORDER BY COUNT(x.ean) > 0 DESC, h.starts DESC, MAX(x.observed_on) DESC, h.name, h.ean
+      LIMIT ${SEARCH_PRODUCT_LIMIT}
+    )
+    ${SELECT_ROWS} FROM products p LEFT JOIN prices x ON x.ean = p.ean AND x.source = ${src}
+    WHERE p.ean IN (SELECT ean FROM ranked)
     ORDER BY p.name, x.price_cents`;
   const res = await db.prepare(sql).bind(...p.values).all<CatalogueRow>();
 
@@ -240,9 +315,11 @@ export async function catalogueSearch(db: D1Database, q: string, source: Catalog
   }
   const products = [...byEan.values()];
   for (const pr of products) pr.offers.sort((a, b) => a.priceCents - b.priceCents);
-  // Products with prices first, then by name, then the cheapest.
+  // Products with prices first, then the best match, then by name, then the cheapest.
   const cheapest = (p: Product) => p.offers[0]?.priceCents ?? Number.POSITIVE_INFINITY;
+  const score = new Map(products.map((pr) => [pr, relevance(pr, words)]));
   products.sort((a, b) => Number(b.offers.length > 0) - Number(a.offers.length > 0)
+    || score.get(b)! - score.get(a)!
     || a.name.localeCompare(b.name, 'es') || cheapest(a) - cheapest(b));
   return products;
 }

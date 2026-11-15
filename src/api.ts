@@ -4,14 +4,23 @@ import { isStale } from './store';
 
 export interface PriceRow { ean: string; name: string; brand: string | null; size: string | null; chain: string; source: string; price_cents: number; observed_on: string; place: string | null }
 
-/** Search: products whose name or brand matches, each with every known price. Demo and real prices stay apart. */
+/**
+ * Search: products whose name or brand matches, each with every known price. Demo and real
+ * prices stay apart. The 30 products are chosen among those with a price (most recently
+ * seen first), so products without one never take the places.
+ */
 export async function searchProducts(db: D1Database, q: string, now = new Date()) {
   const term = q.trim().toLowerCase();
   if (term.length < 2) return { products: [] };
   const like = likePattern(term);
   const rows = await db.prepare(`SELECT p.ean, p.name, p.brand, p.size, x.chain, x.source, x.price_cents, x.observed_on, x.place
     FROM products p JOIN prices x ON x.ean = p.ean
-    WHERE p.ean IN (SELECT ean FROM products WHERE lower(name) LIKE ?1 ESCAPE '\\' OR lower(coalesce(brand,'')) LIKE ?1 ESCAPE '\\' OR ean = ?2 LIMIT 30)
+    WHERE p.ean IN (
+      SELECT c.ean FROM products c
+      WHERE (lower(c.name) LIKE ?1 ESCAPE '\\' OR lower(coalesce(c.brand,'')) LIKE ?1 ESCAPE '\\' OR c.ean = ?2)
+        AND EXISTS (SELECT 1 FROM prices y WHERE y.ean = c.ean)
+      ORDER BY (SELECT MAX(y.observed_on) FROM prices y WHERE y.ean = c.ean) DESC, c.name, c.ean
+      LIMIT 30)
     ORDER BY p.name, x.price_cents`).bind(like, term).all<PriceRow>();
   const byEan = new Map<string, { ean: string; name: string; brand: string | null; size: string | null; match: string; prices: unknown[] }>();
   for (const r of rows.results) {
